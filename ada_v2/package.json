@@ -1,0 +1,51 @@
+{
+  "name": "ada-v2",
+  "version": "1.0.0",
+  "description": "A.D.A V2 - AI Assistant",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && npx electron .\"",
+    "build": "vite build",
+    "build:ios": "cross-env VITE_BACKEND_URL=https://ada.idc1.surf-thailand.com vite build",
+    "cap:add:ios": "npx cap add ios",
+    "cap:sync:ios": "npx cap sync ios",
+    "cap:open:ios": "npx cap open ios",
+    "start": "npx electron .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^0.10.22-rc.20250304",
+    "@react-three/drei": "^9.99.0",
+    "@react-three/fiber": "^8.15.16",
+    "@types/three": "^0.160.0",
+    "clsx": "^2.1.0",
+    "framer-motion": "^11.0.0",
+    "lucide-react": "^0.300.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "socket.io-client": "^4.7.4",
+    "tailwind-merge": "^2.2.0",
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@vitest/coverage-v8": "^2.1.8",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.17",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^28.2.0",
+    "jsdom": "^24.0.0",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "vite": "^5.1.0",
+    "vitest": "^2.1.8",
+    "wait-on": "^7.2.0"
+  }
+}

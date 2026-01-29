@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      MCP_GLAMA_BASE_URL: ${MCP_GLAMA_BASE_URL:-http://mcp-glama:8014}
+      IMAGE_BACKEND: ${IMAGE_BACKEND:-gemini}
+      MCP_IMAGEN_BASE_URL: ${MCP_IMAGEN_BASE_URL:-http://mcp-imagen-light:8020}
+      MCP_IMAGEN_TIMEOUT_S: ${MCP_IMAGEN_TIMEOUT_S:-180}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    privileged: true
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+    networks:
+      - default
+      - idc1-services-net
+    ports:
+      - "8000:8000"
+
+  pc1-ada:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+
+networks:
+  idc1-services-net:
+    external: true
+    name: idc1-services-net

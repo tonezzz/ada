@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps (pyaudio needs portaudio headers; gcc for building wheels if needed)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        portaudio19-dev \
+        libglib2.0-0 \
+        libgl1 \
+        libsm6 \
+        libx11-6 \
+        libxext6 \
+        libxrender1 \
+        libxcb1 \
+        libxkbcommon0 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./requirements.txt
+
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt \
+    && python -m pip install uvicorn
+
+COPY backend ./backend
+
+WORKDIR /app/backend
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "server:app_socketio", "--host", "0.0.0.0", "--port", "8000"]
