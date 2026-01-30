@@ -123,6 +123,25 @@ function App() {
     const hasStreamedAssistantAudioRef = useRef(false);
     const assistantAudioSrcRateRef = useRef(null);
 
+    const stopAssistantPlayback = () => {
+        try {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        try {
+            playbackQueueRef.current = [];
+            playbackQueueOffsetRef.current = 0;
+            playbackBufferedSamplesRef.current = 0;
+            playbackStartedRef.current = false;
+        } catch (e) {
+            // ignore
+        }
+    };
+
     const speakText = (text) => {
         try {
             if (!text) return;
@@ -615,13 +634,7 @@ function App() {
 
                 if (!hasStreamedAssistantAudioRef.current) {
                     hasStreamedAssistantAudioRef.current = true;
-                    try {
-                        if ('speechSynthesis' in window) {
-                            window.speechSynthesis.cancel();
-                        }
-                    } catch (e) {
-                        // ignore
-                    }
+                    stopAssistantPlayback();
                 }
 
                 let ab = null;
@@ -769,6 +782,10 @@ function App() {
             addMessage('System', `Error: ${data.msg}`);
         };
 
+        const onAudioInterrupt = () => {
+            stopAssistantPlayback();
+        };
+
         const onImageData = (payload) => {
             const mime = payload?.mime || 'image/png';
             const data = payload?.data;
@@ -789,6 +806,7 @@ function App() {
         socket.on('audio_data', onAudioData);
         socket.on('assistant_audio_format', onAssistantAudioFormat);
         socket.on('assistant_audio_chunk', onAssistantAudioChunk);
+        socket.on('audio_interrupt', onAudioInterrupt);
 
         socket.on('assistant_text', onAssistantText);
         socket.on('auth_status', onAuthStatus);
@@ -983,6 +1001,7 @@ function App() {
                 socket.off('audio_data', onAudioData);
                 socket.off('assistant_audio_format', onAssistantAudioFormat);
                 socket.off('assistant_audio_chunk', onAssistantAudioChunk);
+                socket.off('audio_interrupt', onAudioInterrupt);
                 socket.off('assistant_text', onAssistantText);
                 socket.off('auth_status', onAuthStatus);
                 socket.off('settings', onSettings);
@@ -1072,16 +1091,6 @@ function App() {
 
         return () => {
             socket.off('connect', onConnect);
-            socket.off('disconnect', onDisconnect);
-            socket.off('status', onStatus);
-            socket.off('audio_data', onAudioData);
-            socket.off('assistant_audio_format', onAssistantAudioFormat);
-            socket.off('assistant_audio_chunk', onAssistantAudioChunk);
-            socket.off('assistant_text', onAssistantText);
-            socket.off('auth_status', onAuthStatus);
-            socket.off('settings', onSettings);
-            socket.off('error', onError);
-            socket.off('image_data', onImageData);
 
             socket.off('cad_data');
             socket.off('cad_thought');

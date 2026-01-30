@@ -550,6 +550,9 @@ async def start_audio(sid, data=None):
         def on_error(msg):
             asyncio.create_task(sio.emit('error', {'msg': msg}, room=sid))
 
+        def on_audio_interrupt(payload):
+            asyncio.create_task(sio.emit('audio_interrupt', payload or {}, room=sid))
+
         try:
             print(f"Initializing AudioLoop with device_index={device_index}")
             audio_loop = ada.AudioLoop(
@@ -564,6 +567,7 @@ async def start_audio(sid, data=None):
                 on_project_update=on_project_update,
                 on_device_update=on_device_update,
                 on_error=on_error,
+                on_audio_interrupt=on_audio_interrupt,
                 input_device_index=device_index,
                 input_device_name=device_name,
                 kasa_agent=kasa_agent,
@@ -662,6 +666,11 @@ async def mic_audio_chunk(sid, data):
 
     if not pcm_bytes:
         return
+
+    try:
+        audio_loop.clear_audio_queue()
+    except Exception:
+        pass
 
     # Rate-limited debug: print every ~50 chunks per sid
     try:
@@ -803,6 +812,11 @@ async def user_input(sid, data):
     if not audio_loop.session:
         print("[SERVER DEBUG] [Error] Session is None. Cannot send text.")
         return
+
+    try:
+        audio_loop.clear_audio_queue()
+    except Exception:
+        pass
 
     if text:
         print(f"[SERVER DEBUG] Sending message to model: '{text}'")

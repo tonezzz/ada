@@ -41,11 +41,20 @@ function IPhoneApp() {
         setMessages((prev) => [...prev, { role, text }]);
     };
 
-    const stopSpeaking = () => {
+    const stopAssistantPlayback = () => {
         try {
             if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
                 window.speechSynthesis.cancel();
             }
+        } catch (e) {
+            // ignore
+        }
+
+        try {
+            playbackQueueRef.current = [];
+            playbackQueueOffsetRef.current = 0;
+            playbackBufferedSamplesRef.current = 0;
+            playbackStartedRef.current = false;
         } catch (e) {
             // ignore
         }
@@ -119,7 +128,7 @@ function IPhoneApp() {
 
                 if (!hasStreamedAssistantAudioRef.current) {
                     hasStreamedAssistantAudioRef.current = true;
-                    stopSpeaking();
+                    stopAssistantPlayback();
                 }
 
                 let ab = null;
@@ -220,12 +229,17 @@ function IPhoneApp() {
             }
         };
 
+        const onAudioInterrupt = () => {
+            stopAssistantPlayback();
+        };
+
         socket.on('connect', onConnect);
         socket.on('disconnect', onDisconnect);
         socket.on('status', onStatus);
         socket.on('assistant_text', onAssistantText);
         socket.on('assistant_audio_format', onAssistantAudioFormat);
         socket.on('assistant_audio_chunk', onAssistantAudioChunk);
+        socket.on('audio_interrupt', onAudioInterrupt);
 
         return () => {
             socket.off('connect', onConnect);
@@ -234,6 +248,7 @@ function IPhoneApp() {
             socket.off('assistant_text', onAssistantText);
             socket.off('assistant_audio_format', onAssistantAudioFormat);
             socket.off('assistant_audio_chunk', onAssistantAudioChunk);
+            socket.off('audio_interrupt', onAudioInterrupt);
             socket.disconnect();
 
             try {
