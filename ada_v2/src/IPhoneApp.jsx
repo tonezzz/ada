@@ -204,7 +204,7 @@ function IPhoneApp() {
                 src.buffer = buffer;
 
                 const chunkGain = pctx.createGain();
-                chunkGain.gain.value = 0;
+                chunkGain.gain.value = 1;
                 src.connect(chunkGain);
                 chunkGain.connect(playbackGainRef.current);
 
@@ -218,11 +218,7 @@ function IPhoneApp() {
                 }
                 const startAt = playbackNextTimeRef.current;
 
-                const fade = Math.min(0.001, buffer.duration / 8);
-                chunkGain.gain.setValueAtTime(0, startAt);
-                chunkGain.gain.linearRampToValueAtTime(1, startAt + fade);
-                chunkGain.gain.setValueAtTime(1, Math.max(startAt + fade, startAt + buffer.duration - fade));
-                chunkGain.gain.linearRampToValueAtTime(0, startAt + buffer.duration);
+                chunkGain.gain.setValueAtTime(1, startAt);
 
                 src.start(startAt);
                 playbackNextTimeRef.current = startAt + buffer.duration;
