@@ -209,9 +209,12 @@ function IPhoneApp() {
                 chunkGain.connect(playbackGainRef.current);
 
                 const now = pctx.currentTime || 0;
-                const lead = 0.06;
-                if (!playbackNextTimeRef.current || playbackNextTimeRef.current < now + lead) {
-                    playbackNextTimeRef.current = now + lead;
+                const safety = 0.005;
+                if (!playbackNextTimeRef.current) {
+                    playbackNextTimeRef.current = now + safety;
+                }
+                if (playbackNextTimeRef.current < now + safety) {
+                    playbackNextTimeRef.current = now + safety;
                 }
                 const startAt = playbackNextTimeRef.current;
 
