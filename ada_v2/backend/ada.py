@@ -28,7 +28,7 @@ from tools import tools_list
 FORMAT = None
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
-RECEIVE_SAMPLE_RATE = 24000
+RECEIVE_SAMPLE_RATE = int(os.getenv("ADA_RECEIVE_SAMPLE_RATE") or 24000)
 CHUNK_SIZE = 1024
 
 MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
