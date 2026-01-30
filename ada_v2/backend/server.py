@@ -515,7 +515,31 @@ async def start_audio(sid, data=None):
         def on_audio_data(data_bytes):
             if not data_bytes:
                 return
-            asyncio.create_task(sio.emit('assistant_audio_chunk', data_bytes, room=sid))
+
+            async def _emit_chunks(pcm: bytes):
+                try:
+                    # Split into small frames to smooth playback on the frontend.
+                    # PCM16 mono at 24kHz: 20ms = 480 samples = 960 bytes.
+                    sample_rate = int(getattr(ada, 'RECEIVE_SAMPLE_RATE', 24000) or 24000)
+                    frame_ms = int(os.getenv('ADA_ASSISTANT_AUDIO_FRAME_MS') or 20)
+                    bytes_per_sample = 2
+                    channels = 1
+                    frame_bytes = max(1, int(sample_rate * frame_ms / 1000) * bytes_per_sample * channels)
+                    frame_bytes = (frame_bytes // 2) * 2  # keep int16 alignment
+
+                    for i in range(0, len(pcm), frame_bytes):
+                        chunk = pcm[i:i + frame_bytes]
+                        if chunk:
+                            await sio.emit('assistant_audio_chunk', chunk, room=sid)
+                            await asyncio.sleep(0)
+                except Exception:
+                    # Best-effort; if chunking fails, fall back to single emit.
+                    try:
+                        await sio.emit('assistant_audio_chunk', pcm, room=sid)
+                    except Exception:
+                        pass
+
+            asyncio.create_task(_emit_chunks(data_bytes))
             step = max(1, len(data_bytes) // 64)
             viz = [b for i, b in enumerate(data_bytes[::step][:64])]
             asyncio.create_task(sio.emit('audio_data', {'data': viz}, room=sid))

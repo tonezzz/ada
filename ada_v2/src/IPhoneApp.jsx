@@ -27,11 +27,8 @@ function IPhoneApp() {
     // Streamed assistant audio playback
     const playbackAudioContextRef = useRef(null);
     const playbackGainRef = useRef(null);
-    const playbackProcessorRef = useRef(null);
-    const playbackQueueRef = useRef([]);
-    const playbackQueueOffsetRef = useRef(0);
-    const playbackBufferedSamplesRef = useRef(0);
-    const playbackStartedRef = useRef(false);
+    const playbackScheduledSourcesRef = useRef([]);
+    const playbackNextTimeRef = useRef(0);
     const hasStreamedAssistantAudioRef = useRef(false);
     const assistantAudioSrcRateRef = useRef(null);
 
@@ -51,10 +48,21 @@ function IPhoneApp() {
         }
 
         try {
-            playbackQueueRef.current = [];
-            playbackQueueOffsetRef.current = 0;
-            playbackBufferedSamplesRef.current = 0;
-            playbackStartedRef.current = false;
+            const sources = playbackScheduledSourcesRef.current || [];
+            for (const s of sources) {
+                try {
+                    s.stop(0);
+                } catch (e) {
+                    // ignore
+                }
+                try {
+                    s.disconnect();
+                } catch (e) {
+                    // ignore
+                }
+            }
+            playbackScheduledSourcesRef.current = [];
+            playbackNextTimeRef.current = 0;
         } catch (e) {
             // ignore
         }
@@ -144,7 +152,8 @@ function IPhoneApp() {
                 const int16 = new Int16Array(ab);
 
                 if (!playbackAudioContextRef.current) {
-                    playbackAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+                    // Prefer 48kHz for smoother resampling from 24kHz (2x), if supported.
+                    playbackAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
                 }
                 const pctx = playbackAudioContextRef.current;
 
@@ -157,45 +166,6 @@ function IPhoneApp() {
                     g.gain.value = 0.75;
                     g.connect(pctx.destination);
                     playbackGainRef.current = g;
-                }
-
-                if (!playbackProcessorRef.current) {
-                    const processor = pctx.createScriptProcessor(4096, 0, 1);
-                    playbackProcessorRef.current = processor;
-
-                    processor.onaudioprocess = (evt) => {
-                        const out = evt.outputBuffer.getChannelData(0);
-                        out.fill(0);
-
-                        const minBuffer = Math.floor((pctx.sampleRate || 48000) * 0.12);
-                        if (!playbackStartedRef.current) {
-                            if ((playbackBufferedSamplesRef.current || 0) < minBuffer) return;
-                            playbackStartedRef.current = true;
-                        }
-
-                        let written = 0;
-                        while (written < out.length && playbackQueueRef.current.length > 0) {
-                            const head = playbackQueueRef.current[0];
-                            const offset = playbackQueueOffsetRef.current || 0;
-                            const available = head.length - offset;
-                            if (available <= 0) {
-                                playbackQueueRef.current.shift();
-                                playbackQueueOffsetRef.current = 0;
-                                continue;
-                            }
-                            const toCopy = Math.min(available, out.length - written);
-                            out.set(head.subarray(offset, offset + toCopy), written);
-                            written += toCopy;
-                            playbackQueueOffsetRef.current = offset + toCopy;
-                            playbackBufferedSamplesRef.current = Math.max(0, (playbackBufferedSamplesRef.current || 0) - toCopy);
-                            if (playbackQueueOffsetRef.current >= head.length) {
-                                playbackQueueRef.current.shift();
-                                playbackQueueOffsetRef.current = 0;
-                            }
-                        }
-                    };
-
-                    processor.connect(playbackGainRef.current);
                 }
 
                 const float32 = new Float32Array(int16.length);
@@ -222,8 +192,32 @@ function IPhoneApp() {
                     out = resampled;
                 }
 
-                playbackQueueRef.current.push(out);
-                playbackBufferedSamplesRef.current = (playbackBufferedSamplesRef.current || 0) + out.length;
+                const buffer = pctx.createBuffer(1, out.length, dstRate || (pctx.sampleRate || 48000));
+                buffer.getChannelData(0).set(out);
+
+                const src = pctx.createBufferSource();
+                src.buffer = buffer;
+                src.connect(playbackGainRef.current);
+
+                const now = pctx.currentTime || 0;
+                const lead = 0.06;
+                if (!playbackNextTimeRef.current || playbackNextTimeRef.current < now + lead) {
+                    playbackNextTimeRef.current = now + lead;
+                }
+                const startAt = playbackNextTimeRef.current;
+                src.start(startAt);
+                playbackNextTimeRef.current = startAt + buffer.duration;
+
+                playbackScheduledSourcesRef.current.push(src);
+                src.onended = () => {
+                    try {
+                        const arr = playbackScheduledSourcesRef.current || [];
+                        const idx = arr.indexOf(src);
+                        if (idx >= 0) arr.splice(idx, 1);
+                    } catch (e) {
+                        // ignore
+                    }
+                };
             } catch (e) {
                 // ignore
             }
@@ -252,10 +246,21 @@ function IPhoneApp() {
             socket.disconnect();
 
             try {
-                if (playbackProcessorRef.current) {
-                    playbackProcessorRef.current.disconnect();
-                    playbackProcessorRef.current.onaudioprocess = null;
+                const sources = playbackScheduledSourcesRef.current || [];
+                for (const s of sources) {
+                    try {
+                        s.stop(0);
+                    } catch (e) {
+                        // ignore
+                    }
+                    try {
+                        s.disconnect();
+                    } catch (e) {
+                        // ignore
+                    }
                 }
+                playbackScheduledSourcesRef.current = [];
+                playbackNextTimeRef.current = 0;
             } catch (e) {
                 // ignore
             }

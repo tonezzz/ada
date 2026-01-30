@@ -1093,25 +1093,41 @@ class AudioLoop:
         if not tool:
             return
 
-        # Prefer 1MCP HTTP proxy when configured (recommended for containers)
-        if self._one_mcp is None:
-            self._one_mcp = _get_one_mcp_client()
-
-        if self._one_mcp is not None:
-            tool_name = tool
-            # Convenience: allow passing just "listStacks" etc
-            if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
-                tool_name = f"portainer_1mcp_{tool_name}"
-            result = await self._one_mcp.call_tool(tool_name, arguments or {})
-        else:
-            # Fallback to spawning portainer-mcp directly
-            if self._portainer_mcp is None:
-                self._portainer_mcp = _get_portainer_mcp_client()
-            result = await self._portainer_mcp.call_tool(tool, arguments or {})
         try:
-            await self.session.send(input=f"System Notification: Portainer MCP tool '{tool}' result:\n{result}", end_of_turn=True)
+            # Prefer 1MCP HTTP proxy when configured (recommended for containers)
+            if self._one_mcp is None:
+                self._one_mcp = _get_one_mcp_client()
+
+            if self._one_mcp is not None:
+                tool_name = tool
+                # Convenience: allow passing just "listStacks" etc
+                if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
+                    tool_name = f"portainer_1mcp_{tool_name}"
+                result = await self._one_mcp.call_tool(tool_name, arguments or {})
+            else:
+                # Fallback to spawning portainer-mcp directly
+                if self._portainer_mcp is None:
+                    self._portainer_mcp = _get_portainer_mcp_client()
+                result = await self._portainer_mcp.call_tool(tool, arguments or {})
+
+            try:
+                await self.session.send(
+                    input=f"System Notification: Portainer MCP tool '{tool}' result:\n{result}",
+                    end_of_turn=True,
+                )
+            except Exception as e:
+                print(f"[ADA DEBUG] [ERR] Failed to send Portainer MCP result: {e}")
         except Exception as e:
-            print(f"[ADA DEBUG] [ERR] Failed to send Portainer MCP result: {e}")
+            msg = (
+                f"System Notification: Portainer tool call failed for '{tool}'.\n"
+                f"Error: {e}\n\n"
+                "If you intended to use 1MCP, set ONE_MCP_URL for the backend container. "
+                "If you intended to use portainer-mcp fallback, set PORTAINER_SERVER and PORTAINER_TOKEN."
+            )
+            try:
+                await self.session.send(input=msg, end_of_turn=True)
+            except Exception:
+                pass
 
     async def handle_list_mcp_tools(self, prefix: str | None = None):
         try:
