@@ -124,6 +124,11 @@ function IPhoneApp() {
                 const sr = parseInt(fmt?.sampleRate, 10);
                 if (Number.isFinite(sr) && sr > 0) {
                     assistantAudioSrcRateRef.current = sr;
+                    try {
+                        localStorage.setItem('assistant_audio_src_rate', String(sr));
+                    } catch (e) {
+                        // ignore
+                    }
                 }
             } catch (e) {
                 // ignore

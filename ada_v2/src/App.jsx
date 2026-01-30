@@ -621,15 +621,14 @@ function App() {
 
         const onAssistantAudioFormat = (fmt) => {
             try {
-                const stored = parseInt(localStorage.getItem('assistant_audio_src_rate') || '', 10);
-                if (Number.isFinite(stored) && stored > 0) {
-                    assistantAudioSrcRateRef.current = stored;
-                    return;
-                }
-
                 const sr = parseInt(fmt?.sampleRate, 10);
                 if (Number.isFinite(sr) && sr > 0) {
                     assistantAudioSrcRateRef.current = sr;
+                    try {
+                        localStorage.setItem('assistant_audio_src_rate', String(sr));
+                    } catch (e) {
+                        // ignore
+                    }
                 }
             } catch (e) {
                 // ignore
@@ -679,16 +678,7 @@ function App() {
                     float32[i] = int16[i] / 32768;
                 }
 
-                if (assistantAudioSrcRateRef.current == null) {
-                    const stored = parseInt(localStorage.getItem('assistant_audio_src_rate') || '', 10);
-                    if (Number.isFinite(stored) && stored > 0) {
-                        assistantAudioSrcRateRef.current = stored;
-                    } else {
-                        assistantAudioSrcRateRef.current = pctx.sampleRate || 48000;
-                    }
-                }
-
-                const srcRate = assistantAudioSrcRateRef.current;
+                const srcRate = assistantAudioSrcRateRef.current || 24000;
                 const dstRate = pctx.sampleRate || 48000;
                 if (!playbackLoggedRef.current) {
                     playbackLoggedRef.current = true;
