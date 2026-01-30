@@ -197,7 +197,11 @@ function IPhoneApp() {
 
                 const src = pctx.createBufferSource();
                 src.buffer = buffer;
-                src.connect(playbackGainRef.current);
+
+                const chunkGain = pctx.createGain();
+                chunkGain.gain.value = 0;
+                src.connect(chunkGain);
+                chunkGain.connect(playbackGainRef.current);
 
                 const now = pctx.currentTime || 0;
                 const lead = 0.06;
@@ -205,12 +209,24 @@ function IPhoneApp() {
                     playbackNextTimeRef.current = now + lead;
                 }
                 const startAt = playbackNextTimeRef.current;
+
+                const fade = Math.min(0.005, buffer.duration / 4);
+                chunkGain.gain.setValueAtTime(0, startAt);
+                chunkGain.gain.linearRampToValueAtTime(1, startAt + fade);
+                chunkGain.gain.setValueAtTime(1, Math.max(startAt + fade, startAt + buffer.duration - fade));
+                chunkGain.gain.linearRampToValueAtTime(0, startAt + buffer.duration);
+
                 src.start(startAt);
                 playbackNextTimeRef.current = startAt + buffer.duration;
 
                 playbackScheduledSourcesRef.current.push(src);
                 src.onended = () => {
                     try {
+                        try {
+                            chunkGain.disconnect();
+                        } catch (e) {
+                            // ignore
+                        }
                         const arr = playbackScheduledSourcesRef.current || [];
                         const idx = arr.indexOf(src);
                         if (idx >= 0) arr.splice(idx, 1);
