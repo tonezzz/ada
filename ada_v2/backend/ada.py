@@ -376,6 +376,9 @@ class AudioLoop:
     async def send_realtime(self):
         while True:
             msg = await self.out_queue.get()
+            if isinstance(msg, dict) and msg.get("_eot"):
+                await self.session.send(input="", end_of_turn=True)
+                continue
             await self.session.send(input=msg, end_of_turn=False)
 
     async def listen_audio(self):
@@ -510,6 +513,38 @@ class AudioLoop:
             return
         if not self.out_queue:
             return
+
+        # Browser-audio mode needs explicit end-of-turn signaling, otherwise
+        # the Gemini Live server may hold the turn open until a deadline.
+        if self.use_browser_audio:
+            try:
+                count = len(pcm16_bytes) // 2
+                if count > 0:
+                    shorts = struct.unpack(f"<{count}h", pcm16_bytes)
+                    sum_squares = sum(s * s for s in shorts)
+                    rms = int(math.sqrt(sum_squares / count))
+                else:
+                    rms = 0
+
+                vad_threshold = int(os.getenv("BROWSER_AUDIO_VAD_THRESHOLD") or 800)
+                silence_s = float(os.getenv("BROWSER_AUDIO_SILENCE_S") or 0.8)
+
+                if rms > vad_threshold:
+                    self._browser_is_speaking = True
+                    self._browser_silence_start_time = None
+                else:
+                    if getattr(self, "_browser_is_speaking", False):
+                        if getattr(self, "_browser_silence_start_time", None) is None:
+                            self._browser_silence_start_time = time.time()
+                        elif time.time() - self._browser_silence_start_time > silence_s:
+                            self._browser_is_speaking = False
+                            self._browser_silence_start_time = None
+                            try:
+                                self.out_queue.put_nowait({"_eot": True})
+                            except asyncio.QueueFull:
+                                pass
+            except Exception:
+                pass
         try:
             self.out_queue.put_nowait({"data": pcm16_bytes, "mime_type": "audio/pcm"})
         except asyncio.QueueFull:
