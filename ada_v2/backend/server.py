@@ -512,14 +512,14 @@ async def start_audio(sid, data=None):
                 await sio.emit('status', {'msg': 'A.D.A Already Running'}, room=sid)
                 return
 
-        def on_audio_data(data_bytes):
-            if not data_bytes:
-                return
+        assistant_audio_emit_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
+        assistant_audio_emit_task: asyncio.Task | None = None
 
-            async def _emit_chunks(pcm: bytes):
+        async def _assistant_audio_emit_worker():
+            while True:
+                pcm = await assistant_audio_emit_q.get()
                 try:
                     # Split into small frames to smooth playback on the frontend.
-                    # PCM16 mono at 24kHz: 20ms = 480 samples = 960 bytes.
                     sample_rate = int(getattr(ada, 'RECEIVE_SAMPLE_RATE', 24000) or 24000)
                     frame_ms = int(os.getenv('ADA_ASSISTANT_AUDIO_FRAME_MS') or 20)
                     bytes_per_sample = 2
@@ -538,8 +538,33 @@ async def start_audio(sid, data=None):
                         await sio.emit('assistant_audio_chunk', pcm, room=sid)
                     except Exception:
                         pass
+                finally:
+                    try:
+                        assistant_audio_emit_q.task_done()
+                    except Exception:
+                        pass
 
-            asyncio.create_task(_emit_chunks(data_bytes))
+        def on_audio_data(data_bytes):
+            if not data_bytes:
+                return
+
+            nonlocal assistant_audio_emit_task
+            if assistant_audio_emit_task is None or assistant_audio_emit_task.done():
+                assistant_audio_emit_task = asyncio.create_task(_assistant_audio_emit_worker())
+
+            try:
+                assistant_audio_emit_q.put_nowait(data_bytes)
+            except asyncio.QueueFull:
+                # Drop oldest to keep latency bounded.
+                try:
+                    assistant_audio_emit_q.get_nowait()
+                    assistant_audio_emit_q.task_done()
+                except Exception:
+                    pass
+                try:
+                    assistant_audio_emit_q.put_nowait(data_bytes)
+                except Exception:
+                    pass
             step = max(1, len(data_bytes) // 64)
             viz = [b for i, b in enumerate(data_bytes[::step][:64])]
             asyncio.create_task(sio.emit('audio_data', {'data': viz}, room=sid))
