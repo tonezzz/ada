@@ -218,7 +218,7 @@ function IPhoneApp() {
                 }
                 const startAt = playbackNextTimeRef.current;
 
-                const fade = Math.min(0.005, buffer.duration / 4);
+                const fade = Math.min(0.001, buffer.duration / 8);
                 chunkGain.gain.setValueAtTime(0, startAt);
                 chunkGain.gain.linearRampToValueAtTime(1, startAt + fade);
                 chunkGain.gain.setValueAtTime(1, Math.max(startAt + fade, startAt + buffer.duration - fade));
