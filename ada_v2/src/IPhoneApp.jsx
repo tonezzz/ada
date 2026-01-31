@@ -32,6 +32,8 @@ function IPhoneApp() {
     const playbackQueueOffsetRef = useRef(0);
     const playbackBufferedSamplesRef = useRef(0);
     const playbackStartedRef = useRef(false);
+    const playbackTargetBufferSamplesRef = useRef(0);
+    const playbackUnderrunCountRef = useRef(0);
     const hasStreamedAssistantAudioRef = useRef(false);
     const assistantAudioSrcRateRef = useRef(null);
 
@@ -69,6 +71,8 @@ function IPhoneApp() {
             playbackQueueOffsetRef.current = 0;
             playbackBufferedSamplesRef.current = 0;
             playbackStartedRef.current = false;
+            playbackTargetBufferSamplesRef.current = 0;
+            playbackUnderrunCountRef.current = 0;
         } catch (e) {
             // ignore
         }
@@ -187,9 +191,13 @@ function IPhoneApp() {
                         const out = evt.outputBuffer.getChannelData(0);
                         out.fill(0);
 
-                        const minBuffer = Math.floor((pctx.sampleRate || 48000) * 0.12);
+                        const sr = pctx.sampleRate || 48000;
+                        if (!playbackTargetBufferSamplesRef.current) {
+                            playbackTargetBufferSamplesRef.current = Math.floor(sr * 0.06);
+                        }
+
                         if (!playbackStartedRef.current) {
-                            if ((playbackBufferedSamplesRef.current || 0) < minBuffer) return;
+                            if ((playbackBufferedSamplesRef.current || 0) < (playbackTargetBufferSamplesRef.current || 0)) return;
                             playbackStartedRef.current = true;
                         }
 
@@ -211,6 +219,22 @@ function IPhoneApp() {
                             if (playbackQueueOffsetRef.current >= head.length) {
                                 playbackQueueRef.current.shift();
                                 playbackQueueOffsetRef.current = 0;
+                            }
+                        }
+
+                        if (written < out.length) {
+                            playbackUnderrunCountRef.current = (playbackUnderrunCountRef.current || 0) + 1;
+                            playbackStartedRef.current = false;
+                            const nextTarget = Math.min(
+                                Math.floor(sr * 0.25),
+                                Math.max(playbackTargetBufferSamplesRef.current || 0, Math.floor(sr * 0.06)) + Math.floor(sr * 0.03)
+                            );
+                            playbackTargetBufferSamplesRef.current = nextTarget;
+                        } else {
+                            const minTarget = Math.floor(sr * 0.06);
+                            const cur = playbackTargetBufferSamplesRef.current || minTarget;
+                            if (cur > minTarget) {
+                                playbackTargetBufferSamplesRef.current = Math.max(minTarget, cur - Math.floor(sr * 0.003));
                             }
                         }
                     };
