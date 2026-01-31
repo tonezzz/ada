@@ -586,7 +586,7 @@ from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_audio_interrupt=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, use_browser_audio=False):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_audio_interrupt=None, on_status=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, use_browser_audio=False):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
@@ -600,6 +600,7 @@ class AudioLoop:
         self.on_device_update = on_device_update
         self.on_error = on_error
         self.on_audio_interrupt = on_audio_interrupt
+        self.on_status = on_status
         self.input_device_index = input_device_index
         self.input_device_name = input_device_name
         self.output_device_index = output_device_index
@@ -727,6 +728,12 @@ class AudioLoop:
         try:
             if self.on_transcription and isinstance(text, str) and text.strip():
                 self.on_transcription({"sender": "System", "text": text})
+        except Exception:
+            pass
+
+        try:
+            if self.on_status and isinstance(text, str) and text.strip():
+                self.on_status(text)
         except Exception:
             pass
 

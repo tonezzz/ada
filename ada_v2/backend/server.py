@@ -555,6 +555,9 @@ async def start_audio(sid, data=None):
         def on_transcription(payload):
             asyncio.create_task(sio.emit('transcription', payload, room=sid))
 
+        def on_status(msg):
+            asyncio.create_task(sio.emit('status', {'msg': msg}, room=sid))
+
         def on_tool_confirmation(payload):
             asyncio.create_task(sio.emit('tool_confirmation_request', payload, room=sid))
 
@@ -585,6 +588,7 @@ async def start_audio(sid, data=None):
                 on_web_data=on_web_data,
                 on_transcription=on_transcription,
                 on_tool_confirmation=on_tool_confirmation,
+                on_status=on_status,
                 on_cad_status=on_cad_status,
                 on_cad_thought=on_cad_thought,
                 on_project_update=on_project_update,
