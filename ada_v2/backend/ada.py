@@ -641,7 +641,12 @@ class AudioLoop:
         
         self.stop_event = asyncio.Event()
         
-        self.permissions = {} # Default Empty (Will treat unset as True)
+        # Tool permissions map: True => confirmation required, False => auto-allow.
+        # Default to auto-allow safe/read-only tools to avoid repeated confirmation loops.
+        self.permissions = {
+            "list_mcp_tools": False,
+            "portainer_call": False,
+        }
         self._pending_confirmations = {}
 
         # Video buffering state
