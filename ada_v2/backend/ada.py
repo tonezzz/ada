@@ -1763,9 +1763,12 @@ class AudioLoop:
                                     )
                                     function_responses.append(function_response)
                         if function_responses:
-                            # Some Gemini Live deployments/models do not support tool responses in Live sessions.
-                            # When that happens, the server may close the websocket with 1008 (policy violation).
-                            await self._send_tool_responses_compat(function_responses)
+                            # IMPORTANT:
+                            # Some Gemini Live deployments/models do not support native tool responses
+                            # (send_tool_response / ToolResponse). Attempting them can close the websocket
+                            # with 1008 policy violations.
+                            # Default to NOT sending native tool responses; optionally send results as text.
+                            await self._send_tool_results(function_responses)
                 
                 # Turn/Response Loop Finished
                 self.flush_chat()
@@ -1778,31 +1781,31 @@ class AudioLoop:
             # CRITICAL: Re-raise to crash the TaskGroup and trigger outer loop reconnect
             raise e
 
-    async def _send_tool_responses_compat(self, function_responses):
-        # Try the preferred SDK API first.
-        try:
-            send_tool_response = getattr(self.session, "send_tool_response", None)
-            if callable(send_tool_response):
-                await send_tool_response(function_responses=function_responses)
-                return
-        except Exception as e:
-            print(f"[ADA DEBUG] [TOOL] send_tool_response failed: {e}")
+    async def _send_tool_results(self, function_responses):
+        # Native tool responses are opt-in, because they can trigger 1008 policy violations
+        # on some Live endpoints.
+        if _env_true("ADA_USE_NATIVE_TOOL_RESPONSES", False):
+            try:
+                send_tool_response = getattr(self.session, "send_tool_response", None)
+                if callable(send_tool_response):
+                    await send_tool_response(function_responses=function_responses)
+                    return
+            except Exception as e:
+                print(f"[ADA DEBUG] [TOOL] send_tool_response failed: {e}")
 
-        # Fallback: try sending a ToolResponse-like object if present in this SDK.
-        try:
-            tool_response_cls = getattr(types, "ToolResponse", None)
-            if tool_response_cls is not None:
-                await self.session.send(input=tool_response_cls(function_responses=function_responses), end_of_turn=True)
-                return
-        except Exception as e:
-            print(f"[ADA DEBUG] [TOOL] ToolResponse fallback failed: {e}")
+            try:
+                tool_response_cls = getattr(types, "ToolResponse", None)
+                if tool_response_cls is not None:
+                    await self.session.send(input=tool_response_cls(function_responses=function_responses), end_of_turn=True)
+                    return
+            except Exception as e:
+                print(f"[ADA DEBUG] [TOOL] ToolResponse fallback failed: {e}")
 
-        # Last resort: optionally send tool results as plain text.
-        # Default OFF because some Live endpoints treat unsupported operations as policy violations.
+        # Default: send tool results as plain text (safe across endpoints).
+        if not _env_true("ADA_TOOL_RESPONSE_TEXT_FALLBACK", True):
+            return
+
         try:
-            if not _env_true("ADA_TOOL_RESPONSE_FALLBACK_TEXT", False):
-                print("[ADA DEBUG] [TOOL] Skipping plain-text tool fallback (ADA_TOOL_RESPONSE_FALLBACK_TEXT is false)")
-                return
             lines = []
             for fr in function_responses:
                 try:
@@ -1811,7 +1814,7 @@ class AudioLoop:
                     lines.append(f"{name}: {payload}")
                 except Exception:
                     lines.append(str(fr))
-            msg = "Tool results:\n" + "\n".join(lines)
+            msg = "System Notification: Tool results:\n" + "\n".join(lines)
             await self.session.send(input=msg, end_of_turn=True)
         except Exception as e:
             print(f"[ADA DEBUG] [TOOL] Plain text tool fallback failed: {e}")
