@@ -106,6 +106,28 @@ DEFAULT_SETTINGS = {
 
 SETTINGS = DEFAULT_SETTINGS.copy()
 
+
+def _env_true(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes")
+
+
+def _enforce_tool_permission_defaults():
+    try:
+        perms = SETTINGS.get("tool_permissions")
+        if not isinstance(perms, dict):
+            return
+
+        if not _env_true("ADA_CONFIRM_LIST_MCP_TOOLS", False):
+            perms["list_mcp_tools"] = False
+
+        if not _env_true("ADA_CONFIRM_PORTAINER_CALL", False):
+            perms["portainer_call"] = False
+    except Exception:
+        return
+
 def load_settings():
     global SETTINGS
     if os.path.exists(SETTINGS_FILE):
@@ -119,6 +141,7 @@ def load_settings():
                          SETTINGS["tool_permissions"].update(v)
                     else:
                         SETTINGS[k] = v
+            _enforce_tool_permission_defaults()
             print(f"Loaded settings: {SETTINGS}")
         except Exception as e:
             print(f"Error loading settings: {e}")
@@ -133,6 +156,7 @@ def save_settings():
 
 # Load on startup
 load_settings()
+_enforce_tool_permission_defaults()
 
 authenticator = None
 kasa_agent = KasaAgent(known_devices=SETTINGS.get("kasa_devices"))
@@ -1392,12 +1416,12 @@ async def get_settings(sid):
 
 @sio.event
 async def update_settings(sid, data):
-    # Generic update
     print(f"Updating settings: {data}")
     
     # Handle specific keys if needed
     if "tool_permissions" in data:
         SETTINGS["tool_permissions"].update(data["tool_permissions"])
+        _enforce_tool_permission_defaults()
         if audio_loop:
             audio_loop.update_permissions(SETTINGS["tool_permissions"])
             
