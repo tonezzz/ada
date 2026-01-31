@@ -527,11 +527,17 @@ async def start_audio(sid, data=None):
                     frame_bytes = max(1, int(sample_rate * frame_ms / 1000) * bytes_per_sample * channels)
                     frame_bytes = (frame_bytes // 2) * 2  # keep int16 alignment
 
+                    frame_s = max(0.001, float(frame_ms) / 1000.0)
+                    next_emit = asyncio.get_running_loop().time()
+
                     for i in range(0, len(pcm), frame_bytes):
                         chunk = pcm[i:i + frame_bytes]
                         if chunk:
                             await sio.emit('assistant_audio_chunk', chunk, room=sid)
-                            await asyncio.sleep(0)
+                            next_emit += frame_s
+                            sleep_s = next_emit - asyncio.get_running_loop().time()
+                            if sleep_s > 0:
+                                await asyncio.sleep(sleep_s)
                 except Exception:
                     # Best-effort; if chunking fails, fall back to single emit.
                     try:
