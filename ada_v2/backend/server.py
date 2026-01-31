@@ -95,7 +95,9 @@ DEFAULT_SETTINGS = {
         "read_file": True,
         "create_project": True,
         "switch_project": True,
-        "list_projects": True
+        "list_projects": True,
+        "portainer_call": False,
+        "list_mcp_tools": False,
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
