@@ -11,7 +11,7 @@ services:
       IMAGE_BACKEND: ${IMAGE_BACKEND:-gemini}
       MCP_IMAGEN_BASE_URL: ${MCP_IMAGEN_BASE_URL:-http://mcp-imagen-light:8020}
       MCP_IMAGEN_TIMEOUT_S: ${MCP_IMAGEN_TIMEOUT_S:-180}
-      ADA_RECEIVE_SAMPLE_RATE: ${ADA_RECEIVE_SAMPLE_RATE:-16000}
+      ADA_RECEIVE_SAMPLE_RATE: ${ADA_RECEIVE_SAMPLE_RATE:-24000}
       ONE_MCP_URL: ${ONE_MCP_URL:-http://imcp-agent:3050/mcp}
     extra_hosts:
       - "host.docker.internal:host-gateway"
