@@ -115,6 +115,7 @@ function App() {
     const playbackAudioContextRef = useRef(null);
     const playbackGainRef = useRef(null);
     const playbackProcessorRef = useRef(null);
+    const playbackKeepAliveRef = useRef(null);
     const playbackQueueRef = useRef([]);
     const playbackQueueOffsetRef = useRef(0);
     const playbackBufferedSamplesRef = useRef(0);
@@ -708,12 +709,36 @@ function App() {
                 }
 
                 if (!playbackProcessorRef.current) {
-                    const processor = pctx.createScriptProcessor(4096, 0, 1);
+                    const processor = pctx.createScriptProcessor(4096, 1, 1);
                     playbackProcessorRef.current = processor;
+
+                    // Some browsers will not invoke ScriptProcessor without an active input.
+                    // Feed a silent source into it to keep the callback pulling audio.
+                    try {
+                        if (!playbackKeepAliveRef.current && typeof pctx.createConstantSource === 'function') {
+                            const src = pctx.createConstantSource();
+                            const g0 = pctx.createGain();
+                            g0.gain.value = 0;
+                            src.connect(g0);
+                            g0.connect(processor);
+                            src.start();
+                            playbackKeepAliveRef.current = { src, g0 };
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
 
                     processor.onaudioprocess = (evt) => {
                         const out = evt.outputBuffer.getChannelData(0);
                         out.fill(0);
+
+                        if (!playbackLoggedRef.current) {
+                            try {
+                                console.log('[AssistantAudio] ctxState=', pctx.state, 'buffered=', playbackBufferedSamplesRef.current);
+                            } catch (e) {
+                                // ignore
+                            }
+                        }
 
                         const sr = pctx.sampleRate || 48000;
                         if (!playbackTargetBufferSamplesRef.current) {
