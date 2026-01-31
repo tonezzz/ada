@@ -720,6 +720,39 @@ class AudioLoop:
         except Exception:
             pass
 
+    def _emit_system_status(self, text: str):
+        try:
+            if self.on_transcription and isinstance(text, str) and text.strip():
+                self.on_transcription({"sender": "System", "text": text})
+        except Exception:
+            pass
+
+    async def _init_tools_on_connect(self):
+        timeout_s = float(os.getenv("ADA_TOOL_INIT_TIMEOUT_S") or 2.0)
+        try:
+            one_mcp_url = (os.getenv("ONE_MCP_URL") or "").strip()
+            if not one_mcp_url:
+                self._emit_system_status("Tools: unavailable (ONE_MCP_URL not set)")
+                return
+
+            if self._one_mcp is None:
+                self._one_mcp = _get_one_mcp_client()
+
+            if self._one_mcp is None:
+                self._emit_system_status("Tools: unavailable (failed to create MCP client)")
+                return
+
+            data = await asyncio.wait_for(self._one_mcp.list_tools(), timeout=timeout_s)
+            tools = (data or {}).get("tools") if isinstance(data, dict) else None
+            if tools is None:
+                tools = data
+            count = len(tools) if isinstance(tools, list) else 0
+            self._emit_system_status(f"Tools: ready ({count} tools)")
+        except asyncio.TimeoutError:
+            self._emit_system_status(f"Tools: unavailable (init timeout after {timeout_s:.1f}s)")
+        except Exception as e:
+            self._emit_system_status(f"Tools: unavailable ({e})")
+
     async def send_frame(self, frame_data):
         if _env_true("ADA_DISABLE_IMAGE_SEND", default=False):
             return
@@ -1863,6 +1896,11 @@ class AudioLoop:
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
+
+                    try:
+                        await self._init_tools_on_connect()
+                    except Exception:
+                        pass
 
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)
