@@ -15,6 +15,7 @@ import time
 import json
 import httpx
 import random
+from collections import deque
 
 from google import genai
 from google.genai import types
@@ -971,9 +972,10 @@ class AudioLoop:
                 # Browser audio tends to have a higher baseline noise floor; use more conservative defaults.
                 vad_threshold = int(os.getenv("BROWSER_AUDIO_VAD_THRESHOLD") or 1600)
                 silence_s = float(os.getenv("BROWSER_AUDIO_SILENCE_S") or 0.9)
-                vad_attack_frames = int(os.getenv("BROWSER_AUDIO_VAD_ATTACK_FRAMES") or 5)
+                vad_attack_frames = int(os.getenv("BROWSER_AUDIO_VAD_ATTACK_FRAMES") or 4)
                 send_silence_audio = _env_true("BROWSER_AUDIO_SEND_SILENCE", default=False)
-                min_utterance_frames = int(os.getenv("BROWSER_AUDIO_MIN_UTTERANCE_FRAMES") or 8)
+                min_utterance_frames = int(os.getenv("BROWSER_AUDIO_MIN_UTTERANCE_FRAMES") or 4)
+                preroll_chunks = int(os.getenv("BROWSER_AUDIO_PREROLL_CHUNKS") or 4)
 
                 if not hasattr(self, "_browser_vad_logged"):
                     self._browser_vad_logged = True
@@ -991,6 +993,10 @@ class AudioLoop:
                     self._browser_sent_audio_in_utterance = False
                 if not hasattr(self, "_browser_utterance_audio_frames_sent"):
                     self._browser_utterance_audio_frames_sent = 0
+                if not hasattr(self, "_browser_preroll"):
+                    self._browser_preroll = deque(maxlen=max(0, preroll_chunks))
+                if not hasattr(self, "_browser_preroll_flushed"):
+                    self._browser_preroll_flushed = False
 
                 if rms > vad_threshold:
                     self._browser_silence_start_time = None
@@ -998,6 +1004,7 @@ class AudioLoop:
 
                     if not getattr(self, "_browser_is_speaking", False) and self._browser_vad_above_count >= vad_attack_frames:
                         self._browser_is_speaking = True
+                        self._browser_preroll_flushed = False
                 else:
                     self._browser_vad_above_count = 0
                     if getattr(self, "_browser_is_speaking", False):
@@ -1013,16 +1020,37 @@ class AudioLoop:
                                     pass
                             self._browser_sent_audio_in_utterance = False
                             self._browser_utterance_audio_frames_sent = 0
+                            self._browser_preroll_flushed = False
             except Exception:
                 pass
         try:
             if self.use_browser_audio:
                 is_speaking = getattr(self, "_browser_is_speaking", False)
                 if send_silence_audio or is_speaking:
+                    if is_speaking and not getattr(self, "_browser_preroll_flushed", False):
+                        for chunk in list(getattr(self, "_browser_preroll", [])):
+                            try:
+                                self.out_queue.put_nowait({"data": chunk, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
+                            except asyncio.QueueFull:
+                                break
+                        self._browser_preroll_flushed = True
+                        try:
+                            self._browser_utterance_audio_frames_sent = getattr(self, "_browser_utterance_audio_frames_sent", 0) + len(getattr(self, "_browser_preroll", []))
+                            self._browser_preroll.clear()
+                        except Exception:
+                            pass
+
                     self.out_queue.put_nowait({"data": pcm16_bytes, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
                     if is_speaking:
                         self._browser_sent_audio_in_utterance = True
                         self._browser_utterance_audio_frames_sent = getattr(self, "_browser_utterance_audio_frames_sent", 0) + 1
+                    else:
+                        try:
+                            pr = getattr(self, "_browser_preroll", None)
+                            if pr is not None and getattr(pr, "maxlen", 0):
+                                pr.append(pcm16_bytes)
+                        except Exception:
+                            pass
             else:
                 self.out_queue.put_nowait({"data": pcm16_bytes, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
         except asyncio.QueueFull:

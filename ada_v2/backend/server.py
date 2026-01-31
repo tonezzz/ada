@@ -445,6 +445,37 @@ async def connect(sid, environ):
     print(f"Client connected: {sid}")
     await sio.emit('status', {'msg': 'Connected to A.D.A Backend'}, room=sid)
 
+    async def _prewarm_tools():
+        timeout_s = float(os.getenv("ADA_TOOL_INIT_TIMEOUT_S") or 2.0)
+        try:
+            one_mcp_url = (os.getenv("ONE_MCP_URL") or "").strip()
+            if not one_mcp_url:
+                await sio.emit('status', {'msg': 'Tools: unavailable (ONE_MCP_URL not set)'}, room=sid)
+                return
+
+            mcp = getattr(ada, "_get_one_mcp_client", None)
+            if not callable(mcp):
+                await sio.emit('status', {'msg': 'Tools: unavailable (missing _get_one_mcp_client)'}, room=sid)
+                return
+
+            client = mcp()
+            if client is None:
+                await sio.emit('status', {'msg': 'Tools: unavailable (failed to create MCP client)'}, room=sid)
+                return
+
+            data = await asyncio.wait_for(client.list_tools(), timeout=timeout_s)
+            tools = (data or {}).get("tools") if isinstance(data, dict) else None
+            if tools is None:
+                tools = data
+            count = len(tools) if isinstance(tools, list) else 0
+            await sio.emit('status', {'msg': f'Tools: ready ({count} tools)'}, room=sid)
+        except asyncio.TimeoutError:
+            await sio.emit('status', {'msg': f'Tools: unavailable (init timeout after {timeout_s:.1f}s)'}, room=sid)
+        except Exception as e:
+            await sio.emit('status', {'msg': f'Tools: unavailable ({e})'}, room=sid)
+
+    asyncio.create_task(_prewarm_tools())
+
     global authenticator
 
     # Callback for Auth Status
