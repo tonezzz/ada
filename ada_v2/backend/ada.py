@@ -822,9 +822,11 @@ class AudioLoop:
         SILENCE_DURATION = float(os.getenv("ADA_AUDIO_SILENCE_S") or 0.5)
         vad_attack_frames = int(os.getenv("ADA_AUDIO_VAD_ATTACK_FRAMES") or 3)
         send_silence_audio = _env_true("ADA_AUDIO_SEND_SILENCE", default=False)
+        min_utterance_frames = int(os.getenv("ADA_AUDIO_MIN_UTTERANCE_FRAMES") or 4)
 
         vad_above_count = 0
         sent_audio_in_utterance = False
+        utterance_audio_frames_sent = 0
         
         while True:
             if self.paused:
@@ -874,13 +876,14 @@ class AudioLoop:
                             print(f"[ADA DEBUG] [VAD] Silence detected. Resetting speech state.")
                             self._is_speaking = False
                             self._silence_start_time = None
-                            if sent_audio_in_utterance:
+                            if sent_audio_in_utterance and utterance_audio_frames_sent >= min_utterance_frames:
                                 try:
                                     if self.out_queue:
                                         self.out_queue.put_nowait({"_eot": True})
                                 except asyncio.QueueFull:
                                     pass
                             sent_audio_in_utterance = False
+                            utterance_audio_frames_sent = 0
 
                 # 2. Send Audio (gate on VAD so the model stays quiet when idle)
                 if self.out_queue and (send_silence_audio or self._is_speaking):
@@ -888,6 +891,7 @@ class AudioLoop:
                         await self.out_queue.put({"data": data, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
                         if self._is_speaking:
                             sent_audio_in_utterance = True
+                            utterance_audio_frames_sent += 1
 
             except Exception as e:
                 print(f"Error reading audio: {e}")
@@ -920,11 +924,14 @@ class AudioLoop:
                 silence_s = float(os.getenv("BROWSER_AUDIO_SILENCE_S") or 0.8)
                 vad_attack_frames = int(os.getenv("BROWSER_AUDIO_VAD_ATTACK_FRAMES") or 3)
                 send_silence_audio = _env_true("BROWSER_AUDIO_SEND_SILENCE", default=False)
+                min_utterance_frames = int(os.getenv("BROWSER_AUDIO_MIN_UTTERANCE_FRAMES") or 4)
 
                 if not hasattr(self, "_browser_vad_above_count"):
                     self._browser_vad_above_count = 0
                 if not hasattr(self, "_browser_sent_audio_in_utterance"):
                     self._browser_sent_audio_in_utterance = False
+                if not hasattr(self, "_browser_utterance_audio_frames_sent"):
+                    self._browser_utterance_audio_frames_sent = 0
 
                 if rms > vad_threshold:
                     self._browser_silence_start_time = None
@@ -940,12 +947,13 @@ class AudioLoop:
                         elif time.time() - self._browser_silence_start_time > silence_s:
                             self._browser_is_speaking = False
                             self._browser_silence_start_time = None
-                            if getattr(self, "_browser_sent_audio_in_utterance", False):
+                            if getattr(self, "_browser_sent_audio_in_utterance", False) and getattr(self, "_browser_utterance_audio_frames_sent", 0) >= min_utterance_frames:
                                 try:
                                     self.out_queue.put_nowait({"_eot": True})
                                 except asyncio.QueueFull:
                                     pass
                             self._browser_sent_audio_in_utterance = False
+                            self._browser_utterance_audio_frames_sent = 0
             except Exception:
                 pass
         try:
@@ -955,6 +963,7 @@ class AudioLoop:
                     self.out_queue.put_nowait({"data": pcm16_bytes, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
                     if is_speaking:
                         self._browser_sent_audio_in_utterance = True
+                        self._browser_utterance_audio_frames_sent = getattr(self, "_browser_utterance_audio_frames_sent", 0) + 1
             else:
                 self.out_queue.put_nowait({"data": pcm16_bytes, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
         except asyncio.QueueFull:
