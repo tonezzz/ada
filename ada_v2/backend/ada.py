@@ -537,7 +537,9 @@ tools = [
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
-    response_modalities=["AUDIO", "TEXT"],
+    response_modalities=(lambda: (
+        [m.strip().upper() for m in (os.getenv("ADA_RESPONSE_MODALITIES") or "AUDIO").split(",") if m.strip()]
+    ))(),
     # We switch these from [] to {} to enable them with default settings
     output_audio_transcription={}, 
     input_audio_transcription={},
@@ -1697,9 +1699,12 @@ class AudioLoop:
         except Exception as e:
             print(f"[ADA DEBUG] [TOOL] ToolResponse fallback failed: {e}")
 
-        # Last resort: send tool results as plain text. This preserves voice continuity even if
-        # native tool results are not supported by the Live endpoint.
+        # Last resort: optionally send tool results as plain text.
+        # Default OFF because some Live endpoints treat unsupported operations as policy violations.
         try:
+            if not _env_true("ADA_TOOL_RESPONSE_FALLBACK_TEXT", False):
+                print("[ADA DEBUG] [TOOL] Skipping plain-text tool fallback (ADA_TOOL_RESPONSE_FALLBACK_TEXT is false)")
+                return
             lines = []
             for fr in function_responses:
                 try:
