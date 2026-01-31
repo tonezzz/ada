@@ -559,6 +559,14 @@ async def start_audio(sid, data=None):
 
         print(f"Using input device: Name='{device_name}', Index={device_index}, BrowserAudio={use_browser_audio}")
 
+        try:
+            if use_browser_audio:
+                await sio.emit('status', {'msg': 'Browser audio: enabled (awaiting mic chunks...)'}, room=sid)
+            else:
+                await sio.emit('status', {'msg': 'Browser audio: disabled (using PyAudio mic)'}, room=sid)
+        except Exception:
+            pass
+
         if audio_loop:
             if loop_task and (loop_task.done() or loop_task.cancelled()):
                 print("Audio loop task appeared finished/cancelled. Clearing and restarting...")
@@ -656,8 +664,17 @@ async def start_audio(sid, data=None):
                     task.result()
                 except asyncio.CancelledError:
                     print("Audio Loop Cancelled")
+                    try:
+                        asyncio.create_task(sio.emit('status', {'msg': 'Audio loop stopped'}, room=sid))
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"Audio Loop Crashed: {e}")
+                    try:
+                        asyncio.create_task(sio.emit('error', {'msg': f'Audio loop crashed: {str(e)}'}, room=sid))
+                        asyncio.create_task(sio.emit('status', {'msg': f'Audio loop crashed: {str(e)}'}, room=sid))
+                    except Exception:
+                        pass
 
             loop_task.add_done_callback(handle_loop_exit)
             await sio.emit('status', {'msg': 'A.D.A Started'}, room=sid)
@@ -732,6 +749,19 @@ async def mic_audio_chunk(sid, data):
         audio_loop._browser_audio_chunk_counts[sid] = c
         if c % 50 == 0:
             print(f"[SERVER] mic_audio_chunk sid={sid} chunks={c} bytes={len(pcm_bytes)}")
+
+        if str(os.getenv('BROWSER_AUDIO_DEBUG') or '').strip().lower() in ('1', 'true', 'yes'):
+            if c % 100 == 0:
+                try:
+                    asyncio.create_task(
+                        sio.emit(
+                            'status',
+                            {'msg': f'[SERVER] mic_audio_chunk chunks={c} bytes={len(pcm_bytes)}'},
+                            room=sid,
+                        )
+                    )
+                except Exception:
+                    pass
     except Exception:
         pass
 
