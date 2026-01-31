@@ -125,6 +125,18 @@ function App() {
     const hasStreamedAssistantAudioRef = useRef(false);
     const assistantAudioSrcRateRef = useRef(null);
 
+    const ensurePlaybackContextResumed = async () => {
+        try {
+            const pctx = playbackAudioContextRef.current;
+            if (!pctx) return;
+            if (pctx.state === 'suspended') {
+                await pctx.resume();
+            }
+        } catch (e) {
+            // ignore
+        }
+    };
+
     const stopAssistantPlayback = () => {
         try {
             if ('speechSynthesis' in window) {
@@ -610,6 +622,10 @@ function App() {
             socket.emit('get_settings');
         };
 
+        const unlockAudio = () => {
+            ensurePlaybackContextResumed();
+        };
+
         const onDisconnect = () => {
             setStatus('Disconnected');
             setSocketConnected(false);
@@ -681,7 +697,7 @@ function App() {
                 const pctx = playbackAudioContextRef.current;
 
                 if (pctx.state === 'suspended') {
-                    pctx.resume().catch(() => {});
+                    await ensurePlaybackContextResumed();
                 }
 
                 if (!playbackGainRef.current) {
@@ -1028,20 +1044,7 @@ function App() {
             console.warn(
                 '[MediaDevices] enumerateDevices() unavailable. If you need mic/camera selection, use https or access via localhost.'
             );
-            return () => {
-                socket.off('connect', onConnect);
-                socket.off('disconnect', onDisconnect);
-                socket.off('status', onStatus);
-                socket.off('audio_data', onAudioData);
-                socket.off('assistant_audio_format', onAssistantAudioFormat);
-                socket.off('assistant_audio_chunk', onAssistantAudioChunk);
-                socket.off('audio_interrupt', onAudioInterrupt);
-                socket.off('assistant_text', onAssistantText);
-                socket.off('auth_status', onAuthStatus);
-                socket.off('settings', onSettings);
-                socket.off('error', onError);
-                socket.off('image_data', onImageData);
-            };
+            return;
         }
 
         navigator.mediaDevices.enumerateDevices().then(devs => {
@@ -1139,6 +1142,14 @@ function App() {
 
             stopMicVisualizer();
             stopVideo();
+            try {
+                if (typeof window !== 'undefined') {
+                    window.removeEventListener('pointerdown', unlockAudio);
+                    window.removeEventListener('keydown', unlockAudio);
+                }
+            } catch (e) {
+                // ignore
+            }
         };
     }, []);
 
@@ -1593,6 +1604,7 @@ function App() {
             setIsConnected(false);
             setIsMuted(true);
         } else {
+            ensurePlaybackContextResumed();
             const index = micDevices.findIndex(d => d.deviceId === selectedMicId);
             const payload = { device_index: index >= 0 ? index : null, use_browser_audio: !ipcRenderer };
             console.log('[Power] start_audio emit:', payload);
@@ -1616,6 +1628,7 @@ function App() {
                 stopBrowserAudioStream();
                 setIsMuted(true);
             } else {
+                ensurePlaybackContextResumed();
                 startBrowserAudioStream(selectedMicId);
                 setIsMuted(false);
             }
