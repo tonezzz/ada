@@ -114,8 +114,11 @@ function App() {
     const micSourceNodeRef = useRef(null);
     const playbackAudioContextRef = useRef(null);
     const playbackGainRef = useRef(null);
-    const playbackScheduledSourcesRef = useRef([]);
-    const playbackNextTimeRef = useRef(0);
+    const playbackProcessorRef = useRef(null);
+    const playbackQueueRef = useRef([]);
+    const playbackQueueOffsetRef = useRef(0);
+    const playbackBufferedSamplesRef = useRef(0);
+    const playbackStartedRef = useRef(false);
     const playbackLoggedRef = useRef(false);
     const hasStreamedAssistantAudioRef = useRef(false);
     const assistantAudioSrcRateRef = useRef(null);
@@ -130,21 +133,24 @@ function App() {
         }
 
         try {
-            const sources = playbackScheduledSourcesRef.current || [];
-            for (const s of sources) {
+            const processor = playbackProcessorRef.current;
+            if (processor) {
                 try {
-                    s.stop(0);
-                } catch (e) {
-                    // ignore
-                }
-                try {
-                    s.disconnect();
+                    processor.disconnect();
                 } catch (e) {
                     // ignore
                 }
             }
-            playbackScheduledSourcesRef.current = [];
-            playbackNextTimeRef.current = 0;
+            playbackProcessorRef.current = null;
+        } catch (e) {
+            // ignore
+        }
+
+        try {
+            playbackQueueRef.current = [];
+            playbackQueueOffsetRef.current = 0;
+            playbackBufferedSamplesRef.current = 0;
+            playbackStartedRef.current = false;
         } catch (e) {
             // ignore
         }
@@ -673,6 +679,45 @@ function App() {
                     playbackGainRef.current = g;
                 }
 
+                if (!playbackProcessorRef.current) {
+                    const processor = pctx.createScriptProcessor(4096, 0, 1);
+                    playbackProcessorRef.current = processor;
+
+                    processor.onaudioprocess = (evt) => {
+                        const out = evt.outputBuffer.getChannelData(0);
+                        out.fill(0);
+
+                        const minBuffer = Math.floor((pctx.sampleRate || 48000) * 0.12);
+                        if (!playbackStartedRef.current) {
+                            if ((playbackBufferedSamplesRef.current || 0) < minBuffer) return;
+                            playbackStartedRef.current = true;
+                        }
+
+                        let written = 0;
+                        while (written < out.length && playbackQueueRef.current.length > 0) {
+                            const head = playbackQueueRef.current[0];
+                            const offset = playbackQueueOffsetRef.current || 0;
+                            const available = head.length - offset;
+                            if (available <= 0) {
+                                playbackQueueRef.current.shift();
+                                playbackQueueOffsetRef.current = 0;
+                                continue;
+                            }
+                            const toCopy = Math.min(available, out.length - written);
+                            out.set(head.subarray(offset, offset + toCopy), written);
+                            written += toCopy;
+                            playbackQueueOffsetRef.current = offset + toCopy;
+                            playbackBufferedSamplesRef.current = Math.max(0, (playbackBufferedSamplesRef.current || 0) - toCopy);
+                            if (playbackQueueOffsetRef.current >= head.length) {
+                                playbackQueueRef.current.shift();
+                                playbackQueueOffsetRef.current = 0;
+                            }
+                        }
+                    };
+
+                    processor.connect(playbackGainRef.current);
+                }
+
                 const float32 = new Float32Array(int16.length);
                 for (let i = 0; i < int16.length; i++) {
                     float32[i] = int16[i] / 32768;
@@ -688,48 +733,8 @@ function App() {
                     ? _resampleFloat32(float32, srcRate, dstRate)
                     : float32;
 
-                const buffer = pctx.createBuffer(1, out.length, dstRate || (pctx.sampleRate || 48000));
-                buffer.getChannelData(0).set(out);
-
-                const src = pctx.createBufferSource();
-                src.buffer = buffer;
-
-                const chunkGain = pctx.createGain();
-                chunkGain.gain.value = 1;
-                src.connect(chunkGain);
-                chunkGain.connect(playbackGainRef.current);
-
-                const now = pctx.currentTime || 0;
-                const safety = 0.005;
-                if (!playbackNextTimeRef.current) {
-                    playbackNextTimeRef.current = now + safety;
-                }
-                // If we're behind, catch up without inserting large gaps.
-                if (playbackNextTimeRef.current < now + safety) {
-                    playbackNextTimeRef.current = now + safety;
-                }
-                const startAt = playbackNextTimeRef.current;
-
-                chunkGain.gain.setValueAtTime(1, startAt);
-
-                src.start(startAt);
-                playbackNextTimeRef.current = startAt + buffer.duration;
-
-                playbackScheduledSourcesRef.current.push(src);
-                src.onended = () => {
-                    try {
-                        try {
-                            chunkGain.disconnect();
-                        } catch (e) {
-                            // ignore
-                        }
-                        const arr = playbackScheduledSourcesRef.current || [];
-                        const idx = arr.indexOf(src);
-                        if (idx >= 0) arr.splice(idx, 1);
-                    } catch (e) {
-                        // ignore
-                    }
-                };
+                playbackQueueRef.current.push(out);
+                playbackBufferedSamplesRef.current = (playbackBufferedSamplesRef.current || 0) + out.length;
             } catch (e) {
                 // ignore
             }
