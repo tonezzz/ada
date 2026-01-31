@@ -925,11 +925,22 @@ class AudioLoop:
                 else:
                     rms = 0
 
-                vad_threshold = int(os.getenv("BROWSER_AUDIO_VAD_THRESHOLD") or 800)
-                silence_s = float(os.getenv("BROWSER_AUDIO_SILENCE_S") or 0.8)
-                vad_attack_frames = int(os.getenv("BROWSER_AUDIO_VAD_ATTACK_FRAMES") or 3)
+                # Browser audio tends to have a higher baseline noise floor; use more conservative defaults.
+                vad_threshold = int(os.getenv("BROWSER_AUDIO_VAD_THRESHOLD") or 1600)
+                silence_s = float(os.getenv("BROWSER_AUDIO_SILENCE_S") or 0.9)
+                vad_attack_frames = int(os.getenv("BROWSER_AUDIO_VAD_ATTACK_FRAMES") or 5)
                 send_silence_audio = _env_true("BROWSER_AUDIO_SEND_SILENCE", default=False)
-                min_utterance_frames = int(os.getenv("BROWSER_AUDIO_MIN_UTTERANCE_FRAMES") or 4)
+                min_utterance_frames = int(os.getenv("BROWSER_AUDIO_MIN_UTTERANCE_FRAMES") or 8)
+
+                if not hasattr(self, "_browser_vad_logged"):
+                    self._browser_vad_logged = True
+                    print(
+                        "[ADA DEBUG] [BROWSER_VAD] threshold=", vad_threshold,
+                        "attack_frames=", vad_attack_frames,
+                        "min_utterance_frames=", min_utterance_frames,
+                        "silence_s=", silence_s,
+                        "send_silence_audio=", send_silence_audio,
+                    )
 
                 if not hasattr(self, "_browser_vad_above_count"):
                     self._browser_vad_above_count = 0
