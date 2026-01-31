@@ -1057,6 +1057,16 @@ class AudioLoop:
         try:
             if self.use_browser_audio:
                 is_speaking = getattr(self, "_browser_is_speaking", False)
+                # Always keep a rolling pre-roll buffer while idle so we can flush
+                # the start of the utterance when VAD switches to speaking.
+                if not is_speaking:
+                    try:
+                        pr = getattr(self, "_browser_preroll", None)
+                        if pr is not None and getattr(pr, "maxlen", 0):
+                            pr.append(pcm16_bytes)
+                    except Exception:
+                        pass
+
                 if send_silence_audio or is_speaking:
                     if is_speaking and not getattr(self, "_browser_preroll_flushed", False):
                         for chunk in list(getattr(self, "_browser_preroll", [])):
@@ -1075,13 +1085,6 @@ class AudioLoop:
                     if is_speaking:
                         self._browser_sent_audio_in_utterance = True
                         self._browser_utterance_audio_frames_sent = getattr(self, "_browser_utterance_audio_frames_sent", 0) + 1
-                    else:
-                        try:
-                            pr = getattr(self, "_browser_preroll", None)
-                            if pr is not None and getattr(pr, "maxlen", 0):
-                                pr.append(pcm16_bytes)
-                        except Exception:
-                            pass
             else:
                 self.out_queue.put_nowait({"data": pcm16_bytes, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
         except asyncio.QueueFull:
