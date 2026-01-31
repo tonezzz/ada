@@ -537,7 +537,7 @@ tools = [
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
-    response_modalities=["AUDIO"],
+    response_modalities=["AUDIO", "TEXT"],
     # We switch these from [] to {} to enable them with default settings
     output_audio_transcription={}, 
     input_audio_transcription={},
@@ -1663,7 +1663,9 @@ class AudioLoop:
                                     )
                                     function_responses.append(function_response)
                         if function_responses:
-                            await self.session.send_tool_response(function_responses=function_responses)
+                            # Some Gemini Live deployments/models do not support tool responses in Live sessions.
+                            # When that happens, the server may close the websocket with 1008 (policy violation).
+                            await self._send_tool_responses_compat(function_responses)
                 
                 # Turn/Response Loop Finished
                 self.flush_chat()
@@ -1675,6 +1677,41 @@ class AudioLoop:
             traceback.print_exc()
             # CRITICAL: Re-raise to crash the TaskGroup and trigger outer loop reconnect
             raise e
+
+    async def _send_tool_responses_compat(self, function_responses):
+        # Try the preferred SDK API first.
+        try:
+            send_tool_response = getattr(self.session, "send_tool_response", None)
+            if callable(send_tool_response):
+                await send_tool_response(function_responses=function_responses)
+                return
+        except Exception as e:
+            print(f"[ADA DEBUG] [TOOL] send_tool_response failed: {e}")
+
+        # Fallback: try sending a ToolResponse-like object if present in this SDK.
+        try:
+            tool_response_cls = getattr(types, "ToolResponse", None)
+            if tool_response_cls is not None:
+                await self.session.send(input=tool_response_cls(function_responses=function_responses), end_of_turn=True)
+                return
+        except Exception as e:
+            print(f"[ADA DEBUG] [TOOL] ToolResponse fallback failed: {e}")
+
+        # Last resort: send tool results as plain text. This preserves voice continuity even if
+        # native tool results are not supported by the Live endpoint.
+        try:
+            lines = []
+            for fr in function_responses:
+                try:
+                    name = getattr(fr, "name", None)
+                    payload = getattr(fr, "response", None)
+                    lines.append(f"{name}: {payload}")
+                except Exception:
+                    lines.append(str(fr))
+            msg = "Tool results:\n" + "\n".join(lines)
+            await self.session.send(input=msg, end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [TOOL] Plain text tool fallback failed: {e}")
 
     async def play_audio(self):
         if self.use_browser_audio:
