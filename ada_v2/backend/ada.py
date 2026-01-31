@@ -242,6 +242,9 @@ class _MCPHttpClient:
             raise RuntimeError(body["error"])
         return body.get("result") if isinstance(body, dict) else body
 
+    async def list_tools(self):
+        return await self.request("tools/list", {})
+
     async def call_tool(self, name: str, arguments: dict):
         return await self.request("tools/call", {"name": name, "arguments": arguments or {}})
 
