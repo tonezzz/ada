@@ -14,6 +14,7 @@ import struct
 import time
 import json
 import httpx
+import random
 
 from google import genai
 from google.genai import types
@@ -1835,13 +1836,28 @@ class AudioLoop:
             except Exception as e:
                 # This catches the ExceptionGroup from TaskGroup or direct exceptions
                 print(f"[ADA DEBUG] [ERR] Connection Error: {e}")
+                try:
+                    if isinstance(e, BaseExceptionGroup):
+                        for i, sub in enumerate(e.exceptions):
+                            print(f"[ADA DEBUG] [ERR]  sub[{i}]: {sub}")
+                except Exception:
+                    pass
                 
                 if self.stop_event.is_set():
                     break
-                
-                print(f"[ADA DEBUG] [RETRY] Reconnecting in {retry_delay} seconds...")
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 10) # Exponential backoff capped at 10s
+
+                # When the upstream service is unavailable or timing out, be gentle.
+                # Short, repeated reconnects can worsen the situation.
+                emsg = str(e).lower()
+                if "service is currently unavailable" in emsg or "deadline expired" in emsg:
+                    retry_delay = max(retry_delay, 5)
+
+                # Add a small jitter to avoid synchronized reconnect storms.
+                jitter = random.uniform(0.0, min(1.0, retry_delay * 0.1))
+                delay = retry_delay + jitter
+                print(f"[ADA DEBUG] [RETRY] Reconnecting in {delay:.2f} seconds...")
+                await asyncio.sleep(delay)
+                retry_delay = min(retry_delay * 2, 60) # Exponential backoff capped at 60s
                 is_reconnect = True # Next loop will be a reconnect
                 
             finally:

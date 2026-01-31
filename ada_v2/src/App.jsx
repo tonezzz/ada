@@ -645,7 +645,7 @@ function App() {
             }
         };
 
-        const onAssistantAudioChunk = (data) => {
+        const onAssistantAudioChunk = async (data) => {
             try {
                 if (!data) return;
 
@@ -661,10 +661,18 @@ function App() {
                     ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
                 } else if (data?.buffer instanceof ArrayBuffer) {
                     ab = data.buffer;
+                } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
+                    ab = await data.arrayBuffer();
+                } else if (data?.type === 'Buffer' && Array.isArray(data?.data)) {
+                    // Node-style Buffer JSON: { type: 'Buffer', data: [..] }
+                    const u8 = new Uint8Array(data.data);
+                    ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
                 }
 
                 if (!ab || ab.byteLength < 2) return;
-                const int16 = new Int16Array(ab);
+                const alignedBytes = ab.byteLength - (ab.byteLength % 2);
+                if (alignedBytes < 2) return;
+                const int16 = new Int16Array(ab.slice(0, alignedBytes));
 
                 if (!playbackAudioContextRef.current) {
                     // Prefer 48kHz for smoother resampling from 24kHz (2x), if supported.
