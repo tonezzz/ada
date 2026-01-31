@@ -1480,30 +1480,97 @@ class AudioLoop:
                                     tool = fc.args.get("tool")
                                     arguments = fc.args.get("arguments") or {}
                                     print(f"[ADA DEBUG] [TOOL] Tool Call: 'portainer_call' tool='{tool}'")
-                                    asyncio.create_task(self.handle_portainer_call(tool, arguments))
+                                    result_text = "Portainer MCP tool call failed."
+                                    try:
+                                        timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
+                                        if not tool:
+                                            raise RuntimeError("Missing tool")
 
-                                    function_response = types.FunctionResponse(
-                                        id=fc.id,
-                                        name=fc.name,
-                                        response={
-                                            "result": "Portainer MCP tool call started. Do not reply to this message.",
-                                        },
+                                        if self._one_mcp is None:
+                                            self._one_mcp = _get_one_mcp_client()
+                                        if self._one_mcp is None:
+                                            raise RuntimeError("ONE_MCP_URL is not set; cannot call Portainer tools")
+
+                                        tool_name = tool
+                                        if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
+                                            tool_name = f"portainer_1mcp_{tool_name}"
+
+                                        result = await asyncio.wait_for(
+                                            self._one_mcp.call_tool(tool_name, arguments or {}),
+                                            timeout=timeout_s,
+                                        )
+
+                                        result_text = f"Portainer tool '{tool}' ok."
+                                        try:
+                                            self._emit_system_status(f"Portainer '{tool}' result: {result}")
+                                        except Exception:
+                                            pass
+                                    except asyncio.TimeoutError:
+                                        result_text = "Portainer tool call timed out."
+                                    except Exception as e:
+                                        result_text = f"Portainer tool call failed: {e}"
+
+                                    function_responses.append(
+                                        types.FunctionResponse(
+                                            id=fc.id,
+                                            name=fc.name,
+                                            response={"result": result_text},
+                                        )
                                     )
-                                    function_responses.append(function_response)
 
                                 elif fc.name == "list_mcp_tools":
                                     prefix = fc.args.get("prefix")
                                     print(f"[ADA DEBUG] [TOOL] Tool Call: 'list_mcp_tools' prefix='{prefix}'")
-                                    asyncio.create_task(self.handle_list_mcp_tools(prefix))
+                                    result_text = "MCP tools listing failed."
+                                    try:
+                                        timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
 
-                                    function_response = types.FunctionResponse(
-                                        id=fc.id,
-                                        name=fc.name,
-                                        response={
-                                            "result": "MCP tools listing started. Do not reply to this message.",
-                                        },
+                                        if self._one_mcp is None:
+                                            self._one_mcp = _get_one_mcp_client()
+                                        if self._one_mcp is None:
+                                            raise RuntimeError("ONE_MCP_URL is not set; cannot list MCP tools")
+
+                                        data = await asyncio.wait_for(self._one_mcp.list_tools(), timeout=timeout_s)
+                                        tools = (data or {}).get("tools") if isinstance(data, dict) else None
+                                        if tools is None:
+                                            tools = data
+
+                                        if isinstance(prefix, str) and prefix:
+                                            tools = [t for t in (tools or []) if isinstance(t, dict) and str(t.get("name", "")).startswith(prefix)]
+
+                                        normalized = []
+                                        for t in (tools or []):
+                                            if not isinstance(t, dict):
+                                                continue
+                                            normalized.append(
+                                                {
+                                                    "name": t.get("name"),
+                                                    "description": t.get("description"),
+                                                    "inputSchema": t.get("inputSchema") or t.get("input_schema"),
+                                                }
+                                            )
+
+                                        total = len(normalized)
+                                        preview_n = min(total, 30)
+                                        preview = normalized[:preview_n]
+                                        result_text = f"Found {total} MCP tools" + (f" (prefix='{prefix}')" if isinstance(prefix, str) and prefix else "") + f". Preview: {preview}"
+
+                                        try:
+                                            self._emit_system_status(f"MCP tools list ({total}): {preview}")
+                                        except Exception:
+                                            pass
+                                    except asyncio.TimeoutError:
+                                        result_text = "MCP tools listing timed out."
+                                    except Exception as e:
+                                        result_text = f"Failed to list MCP tools: {e}"
+
+                                    function_responses.append(
+                                        types.FunctionResponse(
+                                            id=fc.id,
+                                            name=fc.name,
+                                            response={"result": result_text},
+                                        )
                                     )
-                                    function_responses.append(function_response)
 
                                 elif fc.name == "run_web_agent":
                                     print(f"[ADA DEBUG] [TOOL] Tool Call: 'run_web_agent' with prompt='{prompt}'")
