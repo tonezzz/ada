@@ -755,8 +755,10 @@ function App() {
 
                         const sr = pctx.sampleRate || 48000;
                         if (!playbackTargetBufferSamplesRef.current) {
-                            // Start quickly (lower latency), then adapt upward on underruns.
-                            playbackTargetBufferSamplesRef.current = Math.floor(sr * 0.06);
+                            // ScriptProcessor pulls `out.length` samples at a time. If the target buffer is
+                            // smaller than that, we will *guarantee* underruns and end up rebuffering.
+                            // Keep a modest but safe initial buffer.
+                            playbackTargetBufferSamplesRef.current = Math.max(out.length * 2, Math.floor(sr * 0.10));
                         }
 
                         if (!playbackStartedRef.current) {
@@ -789,12 +791,16 @@ function App() {
                         if (written < out.length) {
                             playbackUnderrunCountRef.current = (playbackUnderrunCountRef.current || 0) + 1;
                             playbackStartedRef.current = false;
-                            // Increase target buffer (up to 250ms) when underruns happen.
-                            const nextTarget = Math.min(Math.floor(sr * 0.25), Math.max(playbackTargetBufferSamplesRef.current || 0, Math.floor(sr * 0.06)) + Math.floor(sr * 0.03));
+                            // Increase target buffer (cap to 200ms) when underruns happen.
+                            // Also ensure target never drops below 2x output buffer.
+                            const minTarget = Math.max(out.length * 2, Math.floor(sr * 0.10));
+                            const cur = Math.max(playbackTargetBufferSamplesRef.current || 0, minTarget);
+                            const nextTarget = Math.min(Math.floor(sr * 0.20), cur + Math.floor(sr * 0.02));
                             playbackTargetBufferSamplesRef.current = nextTarget;
                         } else {
-                            // Slowly relax target buffer down toward 60ms if we're stable.
-                            const minTarget = Math.floor(sr * 0.06);
+                            // Slowly relax target buffer down toward ~100ms (but never below 2x output buffer)
+                            // if we're stable.
+                            const minTarget = Math.max(out.length * 2, Math.floor(sr * 0.10));
                             const cur = playbackTargetBufferSamplesRef.current || minTarget;
                             if (cur > minTarget) {
                                 playbackTargetBufferSamplesRef.current = Math.max(minTarget, cur - Math.floor(sr * 0.003));
