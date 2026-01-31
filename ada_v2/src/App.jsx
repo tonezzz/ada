@@ -123,6 +123,8 @@ function App() {
     const playbackTargetBufferSamplesRef = useRef(0);
     const playbackUnderrunCountRef = useRef(0);
     const playbackLoggedRef = useRef(false);
+    const playbackProcLoggedRef = useRef(false);
+    const playbackProcessCallsRef = useRef(0);
     const hasStreamedAssistantAudioRef = useRef(false);
     const assistantAudioSrcRateRef = useRef(null);
 
@@ -168,6 +170,8 @@ function App() {
             playbackStartedRef.current = false;
             playbackTargetBufferSamplesRef.current = 0;
             playbackUnderrunCountRef.current = 0;
+            playbackProcLoggedRef.current = false;
+            playbackProcessCallsRef.current = 0;
         } catch (e) {
             // ignore
         }
@@ -729,12 +733,21 @@ function App() {
                     }
 
                     processor.onaudioprocess = (evt) => {
+                        playbackProcessCallsRef.current = (playbackProcessCallsRef.current || 0) + 1;
                         const out = evt.outputBuffer.getChannelData(0);
                         out.fill(0);
 
-                        if (!playbackLoggedRef.current) {
+                        if (!playbackProcLoggedRef.current) {
+                            playbackProcLoggedRef.current = true;
                             try {
-                                console.log('[AssistantAudio] ctxState=', pctx.state, 'buffered=', playbackBufferedSamplesRef.current);
+                                console.log(
+                                    '[AssistantAudio] onaudioprocess ctxState=',
+                                    pctx.state,
+                                    'buffered=',
+                                    playbackBufferedSamplesRef.current,
+                                    'calls=',
+                                    playbackProcessCallsRef.current
+                                );
                             } catch (e) {
                                 // ignore
                             }
