@@ -502,65 +502,20 @@ async def start_audio(sid, data=None):
 
         print(f"Using input device: Name='{device_name}', Index={device_index}, BrowserAudio={use_browser_audio}")
 
-        assistant_audio_emit_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
-        assistant_audio_emit_task: asyncio.Task | None = None
-
-        async def _assistant_audio_emit_worker():
-            while True:
-                pcm = await assistant_audio_emit_q.get()
-                try:
-                    # Split into small frames to smooth playback on the frontend.
-                    sample_rate = int(getattr(ada, 'RECEIVE_SAMPLE_RATE', 24000) or 24000)
-                    frame_ms = int(os.getenv('ADA_ASSISTANT_AUDIO_FRAME_MS') or 20)
-                    bytes_per_sample = 2
-                    channels = 1
-                    frame_bytes = max(1, int(sample_rate * frame_ms / 1000) * bytes_per_sample * channels)
-                    frame_bytes = (frame_bytes // 2) * 2  # keep int16 alignment
-
-                    frame_s = max(0.001, float(frame_ms) / 1000.0)
-                    next_emit = asyncio.get_running_loop().time()
-
-                    for i in range(0, len(pcm), frame_bytes):
-                        chunk = pcm[i:i + frame_bytes]
-                        if chunk:
-                            await sio.emit('assistant_audio_chunk', chunk, room=sid)
-                            next_emit += frame_s
-                            sleep_s = next_emit - asyncio.get_running_loop().time()
-                            if sleep_s > 0:
-                                await asyncio.sleep(sleep_s)
-                except Exception:
-                    # Best-effort; if chunking fails, fall back to single emit.
-                    try:
-                        await sio.emit('assistant_audio_chunk', pcm, room=sid)
-                    except Exception:
-                        pass
-                finally:
-                    try:
-                        assistant_audio_emit_q.task_done()
-                    except Exception:
-                        pass
+        if audio_loop:
+            if loop_task and (loop_task.done() or loop_task.cancelled()):
+                print("Audio loop task appeared finished/cancelled. Clearing and restarting...")
+                audio_loop = None
+                loop_task = None
+            else:
+                print("Audio loop already running. Re-connecting client to session.")
+                await sio.emit('status', {'msg': 'A.D.A Already Running'}, room=sid)
+                return
 
         def on_audio_data(data_bytes):
             if not data_bytes:
                 return
-
-            nonlocal assistant_audio_emit_task
-            if assistant_audio_emit_task is None or assistant_audio_emit_task.done():
-                assistant_audio_emit_task = asyncio.create_task(_assistant_audio_emit_worker())
-
-            try:
-                assistant_audio_emit_q.put_nowait(data_bytes)
-            except asyncio.QueueFull:
-                # Drop oldest to keep latency bounded.
-                try:
-                    assistant_audio_emit_q.get_nowait()
-                    assistant_audio_emit_q.task_done()
-                except Exception:
-                    pass
-                try:
-                    assistant_audio_emit_q.put_nowait(data_bytes)
-                except Exception:
-                    pass
+            asyncio.create_task(sio.emit('assistant_audio_chunk', data_bytes, room=sid))
             step = max(1, len(data_bytes) // 64)
             viz = [b for i, b in enumerate(data_bytes[::step][:64])]
             asyncio.create_task(sio.emit('audio_data', {'data': viz}, room=sid))
@@ -595,73 +550,6 @@ async def start_audio(sid, data=None):
         def on_error(msg):
             asyncio.create_task(sio.emit('error', {'msg': msg}, room=sid))
 
-        def on_audio_interrupt(payload):
-            asyncio.create_task(sio.emit('audio_interrupt', payload or {}, room=sid))
-
-        # If the loop is already running (common after a browser refresh), re-bind callbacks to the new client.
-        if audio_loop:
-            if loop_task and (loop_task.done() or loop_task.cancelled()):
-                print("Audio loop task appeared finished/cancelled. Clearing and restarting...")
-                audio_loop = None
-                loop_task = None
-            else:
-                print("Audio loop already running. Re-binding callbacks to new client session.")
-
-                # Cancel any previous per-client emit task if present.
-                try:
-                    prev_task = getattr(audio_loop, '_assistant_audio_emit_task', None)
-                    if prev_task is not None:
-                        prev_task.cancel()
-                except Exception:
-                    pass
-
-                try:
-                    audio_loop.on_audio_data = on_audio_data
-                    audio_loop.on_cad_data = on_cad_data
-                    audio_loop.on_web_data = on_web_data
-                    audio_loop.on_transcription = on_transcription
-                    audio_loop.on_tool_confirmation = on_tool_confirmation
-                    audio_loop.on_cad_status = on_cad_status
-                    audio_loop.on_cad_thought = on_cad_thought
-                    audio_loop.on_project_update = on_project_update
-                    audio_loop.on_device_update = on_device_update
-                    audio_loop.on_error = on_error
-                    audio_loop.on_audio_interrupt = on_audio_interrupt
-                    audio_loop.use_browser_audio = use_browser_audio
-
-                    audio_loop._assistant_audio_emit_q = assistant_audio_emit_q
-                    audio_loop._assistant_audio_emit_task = assistant_audio_emit_task
-                except Exception as e:
-                    print(f"[SERVER] Failed to rebind audio loop callbacks: {e}")
-
-                try:
-                    await sio.emit('status', {'msg': 'A.D.A Reconnected'}, room=sid)
-                except Exception:
-                    pass
-
-                if use_browser_audio:
-                    try:
-                        await sio.emit(
-                            'assistant_audio_format',
-                            {
-                                'sampleRate': getattr(ada, 'RECEIVE_SAMPLE_RATE', 24000),
-                                'channels': 1,
-                                'encoding': 'pcm_s16le',
-                            },
-                            room=sid,
-                        )
-                    except Exception:
-                        pass
-
-                # Ensure current project is re-sent after refresh.
-                try:
-                    if audio_loop.project_manager:
-                        await sio.emit('project_update', {'project': audio_loop.project_manager.current_project}, room=sid)
-                except Exception:
-                    pass
-
-                return
-
         try:
             print(f"Initializing AudioLoop with device_index={device_index}")
             audio_loop = ada.AudioLoop(
@@ -676,7 +564,6 @@ async def start_audio(sid, data=None):
                 on_project_update=on_project_update,
                 on_device_update=on_device_update,
                 on_error=on_error,
-                on_audio_interrupt=on_audio_interrupt,
                 input_device_index=device_index,
                 input_device_name=device_name,
                 kasa_agent=kasa_agent,
@@ -775,11 +662,6 @@ async def mic_audio_chunk(sid, data):
 
     if not pcm_bytes:
         return
-
-    try:
-        audio_loop.clear_audio_queue()
-    except Exception:
-        pass
 
     # Rate-limited debug: print every ~50 chunks per sid
     try:
@@ -921,11 +803,6 @@ async def user_input(sid, data):
     if not audio_loop.session:
         print("[SERVER DEBUG] [Error] Session is None. Cannot send text.")
         return
-
-    try:
-        audio_loop.clear_audio_queue()
-    except Exception:
-        pass
 
     if text:
         print(f"[SERVER DEBUG] Sending message to model: '{text}'")

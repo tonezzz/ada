@@ -12,9 +12,6 @@ import argparse
 import math
 import struct
 import time
-import json
-import httpx
-import random
 
 from google import genai
 from google.genai import types
@@ -29,7 +26,7 @@ from tools import tools_list
 FORMAT = None
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
-RECEIVE_SAMPLE_RATE = int(os.getenv("ADA_RECEIVE_SAMPLE_RATE") or 24000)
+RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
 MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
@@ -37,213 +34,6 @@ DEFAULT_MODE = "camera"
 
 load_dotenv()
 client = None
-
-
-def _env_true(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return str(v).strip().lower() in ("1", "true", "yes")
-
-
-class _MCPStdioClient:
-    def __init__(self, command: str, args: list[str]):
-        self.command = command
-        self.args = args
-        self._proc = None
-        self._reader_task = None
-        self._pending = {}
-        self._next_id = 1
-
-    async def start(self):
-        if self._proc is not None:
-            return
-
-        self._proc = await asyncio.create_subprocess_exec(
-            self.command,
-            *self.args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        self._reader_task = asyncio.create_task(self._read_loop())
-
-        # MCP initialize
-        await self.request(
-            "initialize",
-            {
-                "protocolVersion": "2024-11-05",
-                "clientInfo": {"name": "ada", "version": "0.1"},
-                "capabilities": {},
-            },
-        )
-        # MCP initialized notification
-        await self.notify("initialized", {})
-
-    async def close(self):
-        if self._reader_task:
-            self._reader_task.cancel()
-            self._reader_task = None
-        if self._proc:
-            try:
-                self._proc.terminate()
-            except Exception:
-                pass
-            self._proc = None
-
-    async def _read_loop(self):
-        assert self._proc is not None
-        assert self._proc.stdout is not None
-
-        reader = self._proc.stdout
-        while True:
-            headers = {}
-            # Read headers (LSP-style)
-            while True:
-                line = await reader.readline()
-                if not line:
-                    raise RuntimeError("MCP process stdout closed")
-                if line in (b"\r\n", b"\n"):
-                    break
-                try:
-                    k, v = line.decode("utf-8").split(":", 1)
-                    headers[k.strip().lower()] = v.strip()
-                except Exception:
-                    continue
-
-            content_length = int(headers.get("content-length", "0"))
-            if content_length <= 0:
-                continue
-
-            body = await reader.readexactly(content_length)
-            msg = json.loads(body.decode("utf-8"))
-
-            msg_id = msg.get("id")
-            if msg_id is None:
-                continue
-            fut = self._pending.pop(msg_id, None)
-            if fut and not fut.done():
-                fut.set_result(msg)
-
-    async def _send(self, payload: dict):
-        if self._proc is None or self._proc.stdin is None:
-            raise RuntimeError("MCP process not started")
-        raw = json.dumps(payload).encode("utf-8")
-        header = f"Content-Length: {len(raw)}\r\n\r\n".encode("utf-8")
-        self._proc.stdin.write(header + raw)
-        await self._proc.stdin.drain()
-
-    async def request(self, method: str, params: dict | None = None):
-        await self.start()
-        req_id = self._next_id
-        self._next_id += 1
-        fut = asyncio.get_running_loop().create_future()
-        self._pending[req_id] = fut
-        await self._send(
-            {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "method": method,
-                "params": params or {},
-            }
-        )
-        resp = await fut
-        if "error" in resp:
-            raise RuntimeError(resp["error"])
-        return resp.get("result")
-
-    async def notify(self, method: str, params: dict | None = None):
-        await self.start()
-        await self._send(
-            {
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params or {},
-            }
-        )
-
-    async def list_tools(self):
-        return await self.request("tools/list", {})
-
-    async def call_tool(self, name: str, arguments: dict):
-        return await self.request("tools/call", {"name": name, "arguments": arguments or {}})
-
-
-class _MCPHttpClient:
-    def __init__(self, base_url: str):
-        self.base_url = base_url.rstrip("/")
-        self._session_id = None
-        self._lock = asyncio.Lock()
-
-    def _headers(self):
-        h = {
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-        }
-        if self._session_id:
-            h["mcp-session-id"] = self._session_id
-        return h
-
-    @staticmethod
-    def _parse_streamable_http_body(text: str):
-        # Streamable HTTP responses are often SSE:
-        # event: message\n
-        # data: {json}\n
-        #
-        for line in (text or "").splitlines():
-            if line.startswith("data:"):
-                data = line[len("data:"):].strip()
-                if data:
-                    return json.loads(data)
-        # Fallback: try parse raw JSON
-        return json.loads(text)
-
-    async def initialize(self):
-        async with self._lock:
-            if self._session_id:
-                return
-
-            payload = {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "clientInfo": {"name": "ada", "version": "0.1"},
-                    "capabilities": {},
-                },
-            }
-
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(self.base_url, headers=self._headers(), json=payload)
-
-            sid = resp.headers.get("mcp-session-id")
-            if sid:
-                self._session_id = sid
-
-            body = self._parse_streamable_http_body(resp.text)
-            if isinstance(body, dict) and body.get("error"):
-                raise RuntimeError(body["error"])
-
-    async def request(self, method: str, params: dict | None = None):
-        await self.initialize()
-        payload = {
-            "jsonrpc": "2.0",
-            "id": int(time.time() * 1000) % 2_000_000_000,
-            "method": method,
-            "params": params or {},
-        }
-
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(self.base_url, headers=self._headers(), json=payload)
-
-        body = self._parse_streamable_http_body(resp.text)
-        if isinstance(body, dict) and body.get("error"):
-            raise RuntimeError(body["error"])
-        return body.get("result") if isinstance(body, dict) else body
-
-    async def call_tool(self, name: str, arguments: dict):
-        return await self.request("tools/call", {"name": name, "arguments": arguments or {}})
 
 
 def _get_genai_client():
@@ -258,125 +48,16 @@ def _get_genai_client():
     client = genai.Client(http_options={"api_version": "v1beta"}, api_key=api_key)
     return client
 
-
-def _get_one_mcp_client():
-    url = (os.getenv("ONE_MCP_URL") or "").strip()
-    if not url:
-        return None
-    return _MCPHttpClient(url)
-
-
-def _get_portainer_mcp_client():
-    cmd = (os.getenv("PORTAINER_MCP_COMMAND") or "portainer-mcp").strip()
-    server = (os.getenv("PORTAINER_SERVER") or "").strip()
-    token = (os.getenv("PORTAINER_TOKEN") or "").strip()
-    tools_path = (os.getenv("PORTAINER_MCP_TOOLS") or "").strip()
-    read_only = (os.getenv("PORTAINER_MCP_READ_ONLY") or "").strip().lower() in ("1", "true", "yes")
-    disable_version_check = (os.getenv("PORTAINER_MCP_DISABLE_VERSION_CHECK") or "").strip().lower() in ("1", "true", "yes")
-
-    if not server or not token:
-        raise RuntimeError("PORTAINER_SERVER and PORTAINER_TOKEN must be set to use portainer-mcp fallback")
-
-    args = ["-server", server, "-token", token]
-    if tools_path:
-        args += ["-tools", tools_path]
-    if read_only:
-        args += ["-read-only"]
-    if disable_version_check:
-        args += ["-disable-version-check"]
-
-    return _MCPStdioClient(command=cmd, args=args)
-
-
-def _sanitize_gemini_tool_decl(d: dict):
-    if not isinstance(d, dict):
-        return d
-
-    def _normalize_schema(obj):
-        if isinstance(obj, dict):
-            outd = {}
-            for k, v in obj.items():
-                if k == "type" and isinstance(v, str):
-                    m = {
-                        "OBJECT": "object",
-                        "STRING": "string",
-                        "INTEGER": "integer",
-                        "NUMBER": "number",
-                        "BOOLEAN": "boolean",
-                        "ARRAY": "array",
-                    }
-                    outd[k] = m.get(v, v)
-                else:
-                    outd[k] = _normalize_schema(v)
-            return outd
-        if isinstance(obj, list):
-            return [_normalize_schema(x) for x in obj]
-        return obj
-
-    out = {}
-    if "name" in d:
-        out["name"] = d["name"]
-    if "description" in d:
-        out["description"] = d["description"]
-    if "parameters" in d:
-        out["parameters"] = _normalize_schema(d["parameters"])
-    return out
-
 # Function definitions
 generate_cad = {
     "name": "generate_cad",
     "description": "Generates a 3D CAD model based on a prompt.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "description": "The description of the object to generate."
-            }
-        },
-        "required": ["prompt"]
-    },
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "prompt": {"type": "STRING", "description": "The description of the object to generate."}
         },
         "required": ["prompt"]
-    },
-    "behavior": "NON_BLOCKING"
-}
-
-list_mcp_tools = {
-    "name": "list_mcp_tools",
-    "description": "Lists available MCP tools from 1MCP (ONE_MCP_URL), including their input schemas. Use prefix 'portainer_1mcp_' to list Portainer tools.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "prefix": {
-                "type": "STRING",
-                "description": "Optional tool-name prefix filter (e.g., 'portainer_1mcp_'). Leave empty to return all tools."
-            }
-        }
-    },
-    "behavior": "NON_BLOCKING"
-}
-
-portainer_call = {
-    "name": "portainer_call",
-    "description": "Calls a Portainer MCP tool by name via 1MCP (ONE_MCP_URL). Use tool names like 'portainer_1mcp_listStacks'.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "tool": {
-                "type": "STRING",
-                "description": "The tool name to call (e.g., 'portainer_1mcp_listStacks', 'portainer_1mcp_getStackFile')."
-            },
-            "arguments": {
-                "type": "OBJECT",
-                "description": "Arguments for the tool call (must match the Portainer MCP tool schema)."
-            }
-        },
-        "required": ["tool"]
     },
     "behavior": "NON_BLOCKING"
 }
@@ -511,29 +192,7 @@ iterate_cad_tool = {
     "behavior": "NON_BLOCKING"
 }
 
-tools = [
-    {"google_search": {}},
-    {
-        "function_declarations": (lambda: (
-            [
-                _sanitize_gemini_tool_decl(portainer_call),
-                _sanitize_gemini_tool_decl(list_mcp_tools),
-            ]
-            + ([
-                _sanitize_gemini_tool_decl(create_project_tool),
-                _sanitize_gemini_tool_decl(switch_project_tool),
-            ] if (os.getenv("ADA_ENABLE_PROJECT_TOOLS") or "").strip().lower() in ("1", "true", "yes") else [])
-            + ([
-                _sanitize_gemini_tool_decl(generate_cad),
-                _sanitize_gemini_tool_decl(iterate_cad_tool),
-            ] if (os.getenv("ADA_ENABLE_CAD_TOOLS") or "").strip().lower() in ("1", "true", "yes") else [])
-            + ([
-                _sanitize_gemini_tool_decl(t)
-                for t in (tools_list[0]["function_declarations"][1:])
-            ] if (os.getenv("ADA_ENABLE_FS_TOOLS") or "").strip().lower() in ("1", "true", "yes") else [])
-        ))()
-    },
-]
+tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool] + tools_list[0]['function_declarations'][1:]}]
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
@@ -541,10 +200,10 @@ config = types.LiveConnectConfig(
     # We switch these from [] to {} to enable them with default settings
     output_audio_transcription={}, 
     input_audio_transcription={},
-    system_instruction="คุณชื่อ ชบา เป็นผู้ช่วยที่สวยงามและอ่อนหวานเหมือนความงดงามของดอกชบา"
+    system_instruction="Your name is Ada, which stands for Advanced Design Assistant. "
         "You have a witty and charming personality. "
-        "Your creator is Tony, and you address him as a good friend. "
-        "When answering, respond using compact, complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
+        "Your creator is Naz, and you address him as 'Sir'. "
+        "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
         "You have a fun personality.",
     tools=tools,
     speech_config=types.SpeechConfig(
@@ -581,7 +240,7 @@ from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_audio_interrupt=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, use_browser_audio=False):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, use_browser_audio=False):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
@@ -594,7 +253,6 @@ class AudioLoop:
         self.on_project_update = on_project_update
         self.on_device_update = on_device_update
         self.on_error = on_error
-        self.on_audio_interrupt = on_audio_interrupt
         self.input_device_index = input_device_index
         self.input_device_name = input_device_name
         self.output_device_index = output_device_index
@@ -616,9 +274,6 @@ class AudioLoop:
         self.paused = False
 
         self.session = None
-
-        self._portainer_mcp = None
-        self._one_mcp = None
         
         # Create CadAgent with thought callback
         def handle_cad_thought(thought_text):
@@ -707,15 +362,7 @@ class AudioLoop:
         except Exception as e:
             print(f"[ADA DEBUG] [ERR] Failed to clear audio queue: {e}")
 
-        try:
-            if self.on_audio_interrupt:
-                self.on_audio_interrupt({"reason": "user_input"})
-        except Exception:
-            pass
-
     async def send_frame(self, frame_data):
-        if _env_true("ADA_DISABLE_IMAGE_SEND", default=False):
-            return
         # Update the latest frame payload
         if isinstance(frame_data, bytes):
             b64_data = base64.b64encode(frame_data).decode('utf-8')
@@ -729,27 +376,10 @@ class AudioLoop:
     async def send_realtime(self):
         while True:
             msg = await self.out_queue.get()
-            if isinstance(msg, dict) and msg.get("_eot"):
-                try:
-                    await self.session.send(input=" ", end_of_turn=True)
-                except Exception as e:
-                    print(f"[ADA DEBUG] [ERR] Failed to send end_of_turn marker: {e}")
-                continue
-            try:
-                await self.session.send(input=msg, end_of_turn=False)
-            except Exception as e:
-                try:
-                    mt = msg.get("mime_type") if isinstance(msg, dict) else None
-                    sz = len(msg.get("data")) if isinstance(msg, dict) and isinstance(msg.get("data"), (bytes, bytearray)) else None
-                    print(f"[ADA DEBUG] [ERR] Failed to send realtime input: {e} mime_type={mt} data_bytes={sz}")
-                except Exception:
-                    print(f"[ADA DEBUG] [ERR] Failed to send realtime input: {e}")
+            await self.session.send(input=msg, end_of_turn=False)
 
     async def listen_audio(self):
         if self.use_browser_audio:
-            while True:
-                await asyncio.sleep(1.0)
-        if _env_true("ADA_DISABLE_AUDIO_SEND", default=False):
             while True:
                 await asyncio.sleep(1.0)
         pya = _get_pyaudio()
@@ -829,8 +459,7 @@ class AudioLoop:
                 
                 # 1. Send Audio
                 if self.out_queue:
-                    if not _env_true("ADA_DISABLE_AUDIO_SEND", default=False):
-                        await self.out_queue.put({"data": data, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
+                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
                 
                 # 2. VAD Logic for Video
                 # rms = audioop.rms(data, 2)
@@ -881,43 +510,8 @@ class AudioLoop:
             return
         if not self.out_queue:
             return
-
-        if _env_true("ADA_DISABLE_AUDIO_SEND", default=False):
-            return
-
-        # Browser-audio mode needs explicit end-of-turn signaling, otherwise
-        # the Gemini Live server may hold the turn open until a deadline.
-        if self.use_browser_audio:
-            try:
-                count = len(pcm16_bytes) // 2
-                if count > 0:
-                    shorts = struct.unpack(f"<{count}h", pcm16_bytes)
-                    sum_squares = sum(s * s for s in shorts)
-                    rms = int(math.sqrt(sum_squares / count))
-                else:
-                    rms = 0
-
-                vad_threshold = int(os.getenv("BROWSER_AUDIO_VAD_THRESHOLD") or 800)
-                silence_s = float(os.getenv("BROWSER_AUDIO_SILENCE_S") or 0.8)
-
-                if rms > vad_threshold:
-                    self._browser_is_speaking = True
-                    self._browser_silence_start_time = None
-                else:
-                    if getattr(self, "_browser_is_speaking", False):
-                        if getattr(self, "_browser_silence_start_time", None) is None:
-                            self._browser_silence_start_time = time.time()
-                        elif time.time() - self._browser_silence_start_time > silence_s:
-                            self._browser_is_speaking = False
-                            self._browser_silence_start_time = None
-                            try:
-                                self.out_queue.put_nowait({"_eot": True})
-                            except asyncio.QueueFull:
-                                pass
-            except Exception:
-                pass
         try:
-            self.out_queue.put_nowait({"data": pcm16_bytes, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
+            self.out_queue.put_nowait({"data": pcm16_bytes, "mime_type": "audio/pcm"})
         except asyncio.QueueFull:
             return
 
@@ -1090,87 +684,6 @@ class AudioLoop:
         except Exception as e:
              print(f"[ADA DEBUG] [ERR] Failed to send web agent result to model: {e}")
 
-    async def handle_portainer_call(self, tool: str, arguments: dict | None = None):
-        if not tool:
-            return
-
-        try:
-            # Prefer 1MCP HTTP proxy when configured (recommended for containers)
-            if self._one_mcp is None:
-                self._one_mcp = _get_one_mcp_client()
-
-            if self._one_mcp is not None:
-                tool_name = tool
-                # Convenience: allow passing just "listStacks" etc
-                if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
-                    tool_name = f"portainer_1mcp_{tool_name}"
-                result = await self._one_mcp.call_tool(tool_name, arguments or {})
-            else:
-                # Fallback to spawning portainer-mcp directly
-                if self._portainer_mcp is None:
-                    self._portainer_mcp = _get_portainer_mcp_client()
-                result = await self._portainer_mcp.call_tool(tool, arguments or {})
-
-            try:
-                await self.session.send(
-                    input=f"System Notification: Portainer MCP tool '{tool}' result:\n{result}",
-                    end_of_turn=True,
-                )
-            except Exception as e:
-                print(f"[ADA DEBUG] [ERR] Failed to send Portainer MCP result: {e}")
-        except Exception as e:
-            msg = (
-                f"System Notification: Portainer tool call failed for '{tool}'.\n"
-                f"Error: {e}\n\n"
-                "If you intended to use 1MCP, set ONE_MCP_URL for the backend container. "
-                "If you intended to use portainer-mcp fallback, set PORTAINER_SERVER and PORTAINER_TOKEN."
-            )
-            try:
-                await self.session.send(input=msg, end_of_turn=True)
-            except Exception:
-                pass
-
-    async def handle_list_mcp_tools(self, prefix: str | None = None):
-        try:
-            if self._one_mcp is None:
-                self._one_mcp = _get_one_mcp_client()
-            if self._one_mcp is None:
-                raise RuntimeError("ONE_MCP_URL is not set; cannot list MCP tools")
-
-            data = await self._one_mcp.list_tools()
-            tools = (data or {}).get("tools") if isinstance(data, dict) else None
-            if tools is None:
-                tools = data
-
-            if isinstance(prefix, str) and prefix:
-                tools = [t for t in (tools or []) if isinstance(t, dict) and str(t.get("name", "")).startswith(prefix)]
-
-            # Keep payload small but useful: name + description + inputSchema
-            normalized = []
-            for t in (tools or []):
-                if not isinstance(t, dict):
-                    continue
-                normalized.append(
-                    {
-                        "name": t.get("name"),
-                        "description": t.get("description"),
-                        "inputSchema": t.get("inputSchema") or t.get("input_schema"),
-                    }
-                )
-
-            await self.session.send(
-                input=f"System Notification: MCP tools list ({len(normalized)} tools).\n{normalized}",
-                end_of_turn=True,
-            )
-        except Exception as e:
-            try:
-                await self.session.send(
-                    input=f"System Notification: Failed to list MCP tools: {e}",
-                    end_of_turn=True,
-                )
-            except Exception:
-                pass
-
     async def receive_audio(self):
         "Background task to reads from the websocket and write pcm chunks to the output queue"
         try:
@@ -1252,7 +765,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "portainer_call", "list_mcp_tools", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
                                 # Check Permissions (Default to True if not set)
@@ -1320,35 +833,6 @@ class AudioLoop:
                                     asyncio.create_task(self.handle_cad_request(prompt))
                                     # No function response needed - model already acknowledged when user asked
                                 
-                                elif fc.name == "portainer_call":
-                                    tool = fc.args.get("tool")
-                                    arguments = fc.args.get("arguments") or {}
-                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'portainer_call' tool='{tool}'")
-                                    asyncio.create_task(self.handle_portainer_call(tool, arguments))
-
-                                    function_response = types.FunctionResponse(
-                                        id=fc.id,
-                                        name=fc.name,
-                                        response={
-                                            "result": "Portainer MCP tool call started. Do not reply to this message.",
-                                        },
-                                    )
-                                    function_responses.append(function_response)
-
-                                elif fc.name == "list_mcp_tools":
-                                    prefix = fc.args.get("prefix")
-                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'list_mcp_tools' prefix='{prefix}'")
-                                    asyncio.create_task(self.handle_list_mcp_tools(prefix))
-
-                                    function_response = types.FunctionResponse(
-                                        id=fc.id,
-                                        name=fc.name,
-                                        response={
-                                            "result": "MCP tools listing started. Do not reply to this message.",
-                                        },
-                                    )
-                                    function_responses.append(function_response)
-
                                 elif fc.name == "run_web_agent":
                                     print(f"[ADA DEBUG] [TOOL] Tool Call: 'run_web_agent' with prompt='{prompt}'")
                                     asyncio.create_task(self.handle_web_agent_request(prompt))
@@ -1747,23 +1231,6 @@ class AudioLoop:
         while not self.stop_event.is_set():
             try:
                 print(f"[ADA DEBUG] [CONNECT] Connecting to Gemini Live API...")
-
-                try:
-                    decls = tools[1].get("function_declarations", []) if isinstance(tools, list) and len(tools) > 1 else []
-                    names = []
-                    for d in decls:
-                        if isinstance(d, dict):
-                            pname = d.get("name")
-                            ptype = None
-                            params = d.get("parameters")
-                            if isinstance(params, dict):
-                                ptype = params.get("type")
-                            names.append(f"{pname}({ptype})")
-                    print(f"[ADA DEBUG] [TOOLS] Registered tools: {names}")
-                    print(f"[ADA DEBUG] [TOOLS] ADA_DISABLE_AUDIO_SEND={_env_true('ADA_DISABLE_AUDIO_SEND', False)} ADA_DISABLE_IMAGE_SEND={_env_true('ADA_DISABLE_IMAGE_SEND', False)}")
-                except Exception as e:
-                    print(f"[ADA DEBUG] [ERR] Failed to log tool registration: {e}")
-
                 async with (
                     _get_genai_client().aio.live.connect(model=MODEL, config=config) as session,
                     asyncio.TaskGroup() as tg,
@@ -1836,28 +1303,13 @@ class AudioLoop:
             except Exception as e:
                 # This catches the ExceptionGroup from TaskGroup or direct exceptions
                 print(f"[ADA DEBUG] [ERR] Connection Error: {e}")
-                try:
-                    if isinstance(e, BaseExceptionGroup):
-                        for i, sub in enumerate(e.exceptions):
-                            print(f"[ADA DEBUG] [ERR]  sub[{i}]: {sub}")
-                except Exception:
-                    pass
                 
                 if self.stop_event.is_set():
                     break
-
-                # When the upstream service is unavailable or timing out, be gentle.
-                # Short, repeated reconnects can worsen the situation.
-                emsg = str(e).lower()
-                if "service is currently unavailable" in emsg or "deadline expired" in emsg:
-                    retry_delay = max(retry_delay, 5)
-
-                # Add a small jitter to avoid synchronized reconnect storms.
-                jitter = random.uniform(0.0, min(1.0, retry_delay * 0.1))
-                delay = retry_delay + jitter
-                print(f"[ADA DEBUG] [RETRY] Reconnecting in {delay:.2f} seconds...")
-                await asyncio.sleep(delay)
-                retry_delay = min(retry_delay * 2, 60) # Exponential backoff capped at 60s
+                
+                print(f"[ADA DEBUG] [RETRY] Reconnecting in {retry_delay} seconds...")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 10) # Exponential backoff capped at 10s
                 is_reconnect = True # Next loop will be a reconnect
                 
             finally:

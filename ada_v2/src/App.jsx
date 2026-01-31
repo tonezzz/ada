@@ -115,67 +115,13 @@ function App() {
     const playbackAudioContextRef = useRef(null);
     const playbackGainRef = useRef(null);
     const playbackProcessorRef = useRef(null);
-    const playbackKeepAliveRef = useRef(null);
-    const playbackQueueRef = useRef([]);
+    const playbackQueueRef = useRef([]); // Array<Float32Array>
     const playbackQueueOffsetRef = useRef(0);
     const playbackBufferedSamplesRef = useRef(0);
     const playbackStartedRef = useRef(false);
-    const playbackTargetBufferSamplesRef = useRef(0);
-    const playbackUnderrunCountRef = useRef(0);
     const playbackLoggedRef = useRef(false);
-    const playbackProcLoggedRef = useRef(false);
-    const playbackProcessCallsRef = useRef(0);
     const hasStreamedAssistantAudioRef = useRef(false);
     const assistantAudioSrcRateRef = useRef(null);
-
-    const ensurePlaybackContextResumed = async () => {
-        try {
-            const pctx = playbackAudioContextRef.current;
-            if (!pctx) return;
-            if (pctx.state === 'suspended') {
-                await pctx.resume();
-            }
-        } catch (e) {
-            // ignore
-        }
-    };
-
-    const stopAssistantPlayback = () => {
-        try {
-            if ('speechSynthesis' in window) {
-                window.speechSynthesis.cancel();
-            }
-        } catch (e) {
-            // ignore
-        }
-
-        try {
-            const processor = playbackProcessorRef.current;
-            if (processor) {
-                try {
-                    processor.disconnect();
-                } catch (e) {
-                    // ignore
-                }
-            }
-            playbackProcessorRef.current = null;
-        } catch (e) {
-            // ignore
-        }
-
-        try {
-            playbackQueueRef.current = [];
-            playbackQueueOffsetRef.current = 0;
-            playbackBufferedSamplesRef.current = 0;
-            playbackStartedRef.current = false;
-            playbackTargetBufferSamplesRef.current = 0;
-            playbackUnderrunCountRef.current = 0;
-            playbackProcLoggedRef.current = false;
-            playbackProcessCallsRef.current = 0;
-        } catch (e) {
-            // ignore
-        }
-    };
 
     const speakText = (text) => {
         try {
@@ -627,10 +573,6 @@ function App() {
             socket.emit('get_settings');
         };
 
-        const unlockAudio = () => {
-            ensurePlaybackContextResumed();
-        };
-
         const onDisconnect = () => {
             setStatus('Disconnected');
             setSocketConnected(false);
@@ -652,27 +594,34 @@ function App() {
 
         const onAssistantAudioFormat = (fmt) => {
             try {
+                const stored = parseInt(localStorage.getItem('assistant_audio_src_rate') || '', 10);
+                if (Number.isFinite(stored) && stored > 0) {
+                    assistantAudioSrcRateRef.current = stored;
+                    return;
+                }
+
                 const sr = parseInt(fmt?.sampleRate, 10);
                 if (Number.isFinite(sr) && sr > 0) {
                     assistantAudioSrcRateRef.current = sr;
-                    try {
-                        localStorage.setItem('assistant_audio_src_rate', String(sr));
-                    } catch (e) {
-                        // ignore
-                    }
                 }
             } catch (e) {
                 // ignore
             }
         };
 
-        const onAssistantAudioChunk = async (data) => {
+        const onAssistantAudioChunk = (data) => {
             try {
                 if (!data) return;
 
                 if (!hasStreamedAssistantAudioRef.current) {
                     hasStreamedAssistantAudioRef.current = true;
-                    stopAssistantPlayback();
+                    try {
+                        if ('speechSynthesis' in window) {
+                            window.speechSynthesis.cancel();
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
                 }
 
                 let ab = null;
@@ -682,27 +631,19 @@ function App() {
                     ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
                 } else if (data?.buffer instanceof ArrayBuffer) {
                     ab = data.buffer;
-                } else if (typeof Blob !== 'undefined' && data instanceof Blob) {
-                    ab = await data.arrayBuffer();
-                } else if (data?.type === 'Buffer' && Array.isArray(data?.data)) {
-                    // Node-style Buffer JSON: { type: 'Buffer', data: [..] }
-                    const u8 = new Uint8Array(data.data);
-                    ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
                 }
 
                 if (!ab || ab.byteLength < 2) return;
-                const alignedBytes = ab.byteLength - (ab.byteLength % 2);
-                if (alignedBytes < 2) return;
-                const int16 = new Int16Array(ab.slice(0, alignedBytes));
+                const int16 = new Int16Array(ab);
 
                 if (!playbackAudioContextRef.current) {
-                    // Prefer 48kHz for smoother resampling from 24kHz (2x), if supported.
-                    playbackAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+                    playbackAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
                 }
                 const pctx = playbackAudioContextRef.current;
 
+                // Ensure audio context is running (Chrome often starts suspended until user gesture)
                 if (pctx.state === 'suspended') {
-                    await ensurePlaybackContextResumed();
+                    pctx.resume().catch(() => {});
                 }
 
                 if (!playbackGainRef.current) {
@@ -712,57 +653,19 @@ function App() {
                     playbackGainRef.current = g;
                 }
 
+                // Create a continuous playback processor once.
                 if (!playbackProcessorRef.current) {
-                    const processor = pctx.createScriptProcessor(4096, 1, 1);
+                    const processor = pctx.createScriptProcessor(4096, 0, 1);
                     playbackProcessorRef.current = processor;
 
-                    // Some browsers will not invoke ScriptProcessor without an active input.
-                    // Feed a silent source into it to keep the callback pulling audio.
-                    try {
-                        if (!playbackKeepAliveRef.current && typeof pctx.createConstantSource === 'function') {
-                            const src = pctx.createConstantSource();
-                            const g0 = pctx.createGain();
-                            g0.gain.value = 0;
-                            src.connect(g0);
-                            g0.connect(processor);
-                            src.start();
-                            playbackKeepAliveRef.current = { src, g0 };
-                        }
-                    } catch (e) {
-                        // ignore
-                    }
-
                     processor.onaudioprocess = (evt) => {
-                        playbackProcessCallsRef.current = (playbackProcessCallsRef.current || 0) + 1;
                         const out = evt.outputBuffer.getChannelData(0);
                         out.fill(0);
 
-                        if (!playbackProcLoggedRef.current) {
-                            playbackProcLoggedRef.current = true;
-                            try {
-                                console.log(
-                                    '[AssistantAudio] onaudioprocess ctxState=',
-                                    pctx.state,
-                                    'buffered=',
-                                    playbackBufferedSamplesRef.current,
-                                    'calls=',
-                                    playbackProcessCallsRef.current
-                                );
-                            } catch (e) {
-                                // ignore
-                            }
-                        }
-
-                        const sr = pctx.sampleRate || 48000;
-                        if (!playbackTargetBufferSamplesRef.current) {
-                            // ScriptProcessor pulls `out.length` samples at a time. If the target buffer is
-                            // smaller than that, we will *guarantee* underruns and end up rebuffering.
-                            // Keep a modest but safe initial buffer.
-                            playbackTargetBufferSamplesRef.current = Math.max(out.length * 2, Math.floor(sr * 0.10));
-                        }
-
+                        // Wait for a small prebuffer to reduce crackle/underruns.
+                        const minBuffer = Math.floor((pctx.sampleRate || 48000) * 0.12); // ~120ms
                         if (!playbackStartedRef.current) {
-                            if ((playbackBufferedSamplesRef.current || 0) < (playbackTargetBufferSamplesRef.current || 0)) return;
+                            if ((playbackBufferedSamplesRef.current || 0) < minBuffer) return;
                             playbackStartedRef.current = true;
                         }
 
@@ -786,26 +689,6 @@ function App() {
                                 playbackQueueOffsetRef.current = 0;
                             }
                         }
-
-                        // If we couldn't fill the output buffer, we underrun'd. Rebuffer to avoid repeated gaps.
-                        if (written < out.length) {
-                            playbackUnderrunCountRef.current = (playbackUnderrunCountRef.current || 0) + 1;
-                            playbackStartedRef.current = false;
-                            // Increase target buffer (cap to 200ms) when underruns happen.
-                            // Also ensure target never drops below 2x output buffer.
-                            const minTarget = Math.max(out.length * 2, Math.floor(sr * 0.10));
-                            const cur = Math.max(playbackTargetBufferSamplesRef.current || 0, minTarget);
-                            const nextTarget = Math.min(Math.floor(sr * 0.20), cur + Math.floor(sr * 0.02));
-                            playbackTargetBufferSamplesRef.current = nextTarget;
-                        } else {
-                            // Slowly relax target buffer down toward ~100ms (but never below 2x output buffer)
-                            // if we're stable.
-                            const minTarget = Math.max(out.length * 2, Math.floor(sr * 0.10));
-                            const cur = playbackTargetBufferSamplesRef.current || minTarget;
-                            if (cur > minTarget) {
-                                playbackTargetBufferSamplesRef.current = Math.max(minTarget, cur - Math.floor(sr * 0.003));
-                            }
-                        }
                     };
 
                     processor.connect(playbackGainRef.current);
@@ -816,7 +699,17 @@ function App() {
                     float32[i] = int16[i] / 32768;
                 }
 
-                const srcRate = assistantAudioSrcRateRef.current || 24000;
+                if (assistantAudioSrcRateRef.current == null) {
+                    const stored = parseInt(localStorage.getItem('assistant_audio_src_rate') || '', 10);
+                    if (Number.isFinite(stored) && stored > 0) {
+                        assistantAudioSrcRateRef.current = stored;
+                    } else {
+                        // Default to the playback AudioContext sample rate to avoid any speed/pitch mismatch.
+                        assistantAudioSrcRateRef.current = pctx.sampleRate || 48000;
+                    }
+                }
+
+                const srcRate = assistantAudioSrcRateRef.current;
                 const dstRate = pctx.sampleRate || 48000;
                 if (!playbackLoggedRef.current) {
                     playbackLoggedRef.current = true;
@@ -876,10 +769,6 @@ function App() {
             addMessage('System', `Error: ${data.msg}`);
         };
 
-        const onAudioInterrupt = () => {
-            stopAssistantPlayback();
-        };
-
         const onImageData = (payload) => {
             const mime = payload?.mime || 'image/png';
             const data = payload?.data;
@@ -900,7 +789,6 @@ function App() {
         socket.on('audio_data', onAudioData);
         socket.on('assistant_audio_format', onAssistantAudioFormat);
         socket.on('assistant_audio_chunk', onAssistantAudioChunk);
-        socket.on('audio_interrupt', onAudioInterrupt);
 
         socket.on('assistant_text', onAssistantText);
         socket.on('auth_status', onAuthStatus);
@@ -1088,7 +976,19 @@ function App() {
             console.warn(
                 '[MediaDevices] enumerateDevices() unavailable. If you need mic/camera selection, use https or access via localhost.'
             );
-            return;
+            return () => {
+                socket.off('connect', onConnect);
+                socket.off('disconnect', onDisconnect);
+                socket.off('status', onStatus);
+                socket.off('audio_data', onAudioData);
+                socket.off('assistant_audio_format', onAssistantAudioFormat);
+                socket.off('assistant_audio_chunk', onAssistantAudioChunk);
+                socket.off('assistant_text', onAssistantText);
+                socket.off('auth_status', onAuthStatus);
+                socket.off('settings', onSettings);
+                socket.off('error', onError);
+                socket.off('image_data', onImageData);
+            };
         }
 
         navigator.mediaDevices.enumerateDevices().then(devs => {
@@ -1172,6 +1072,16 @@ function App() {
 
         return () => {
             socket.off('connect', onConnect);
+            socket.off('disconnect', onDisconnect);
+            socket.off('status', onStatus);
+            socket.off('audio_data', onAudioData);
+            socket.off('assistant_audio_format', onAssistantAudioFormat);
+            socket.off('assistant_audio_chunk', onAssistantAudioChunk);
+            socket.off('assistant_text', onAssistantText);
+            socket.off('auth_status', onAuthStatus);
+            socket.off('settings', onSettings);
+            socket.off('error', onError);
+            socket.off('image_data', onImageData);
 
             socket.off('cad_data');
             socket.off('cad_thought');
@@ -1186,14 +1096,6 @@ function App() {
 
             stopMicVisualizer();
             stopVideo();
-            try {
-                if (typeof window !== 'undefined') {
-                    window.removeEventListener('pointerdown', unlockAudio);
-                    window.removeEventListener('keydown', unlockAudio);
-                }
-            } catch (e) {
-                // ignore
-            }
         };
     }, []);
 
@@ -1648,7 +1550,6 @@ function App() {
             setIsConnected(false);
             setIsMuted(true);
         } else {
-            ensurePlaybackContextResumed();
             const index = micDevices.findIndex(d => d.deviceId === selectedMicId);
             const payload = { device_index: index >= 0 ? index : null, use_browser_audio: !ipcRenderer };
             console.log('[Power] start_audio emit:', payload);
@@ -1672,7 +1573,6 @@ function App() {
                 stopBrowserAudioStream();
                 setIsMuted(true);
             } else {
-                ensurePlaybackContextResumed();
                 startBrowserAudioStream(selectedMicId);
                 setIsMuted(false);
             }
