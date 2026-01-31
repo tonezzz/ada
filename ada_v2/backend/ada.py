@@ -818,8 +818,9 @@ class AudioLoop:
             kwargs = {}
         
         # VAD Constants
-        VAD_THRESHOLD = 800 # Adj based on mic sensitivity (800 is conservative for 16-bit)
-        SILENCE_DURATION = 0.5 # Seconds of silence to consider "done speaking"
+        VAD_THRESHOLD = int(os.getenv("ADA_AUDIO_VAD_THRESHOLD") or 800)
+        SILENCE_DURATION = float(os.getenv("ADA_AUDIO_SILENCE_S") or 0.5)
+        send_silence_audio = _env_true("ADA_AUDIO_SEND_SILENCE", default=False)
         
         while True:
             if self.paused:
@@ -828,13 +829,8 @@ class AudioLoop:
 
             try:
                 data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-                
-                # 1. Send Audio
-                if self.out_queue:
-                    if not _env_true("ADA_DISABLE_AUDIO_SEND", default=False):
-                        await self.out_queue.put({"data": data, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
-                
-                # 2. VAD Logic for Video
+
+                # 1. VAD Logic for Audio/Video
                 # rms = audioop.rms(data, 2)
                 # Replacement for audioop.rms(data, 2)
                 count = len(data) // 2
@@ -871,6 +867,16 @@ class AudioLoop:
                             print(f"[ADA DEBUG] [VAD] Silence detected. Resetting speech state.")
                             self._is_speaking = False
                             self._silence_start_time = None
+                            try:
+                                if self.out_queue:
+                                    self.out_queue.put_nowait({"_eot": True})
+                            except asyncio.QueueFull:
+                                pass
+
+                # 2. Send Audio (gate on VAD so the model stays quiet when idle)
+                if self.out_queue and (send_silence_audio or self._is_speaking):
+                    if not _env_true("ADA_DISABLE_AUDIO_SEND", default=False):
+                        await self.out_queue.put({"data": data, "mime_type": f"audio/pcm;rate={SEND_SAMPLE_RATE}"})
 
             except Exception as e:
                 print(f"Error reading audio: {e}")
