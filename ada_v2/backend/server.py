@@ -95,7 +95,9 @@ DEFAULT_SETTINGS = {
         "read_file": True,
         "create_project": True,
         "switch_project": True,
-        "list_projects": True
+        "list_projects": True,
+        "portainer_call": False,
+        "list_mcp_tools": False,
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
@@ -103,6 +105,28 @@ DEFAULT_SETTINGS = {
 }
 
 SETTINGS = DEFAULT_SETTINGS.copy()
+
+
+def _env_true(name: str, default: bool = False) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return str(v).strip().lower() in ("1", "true", "yes")
+
+
+def _enforce_tool_permission_defaults():
+    try:
+        perms = SETTINGS.get("tool_permissions")
+        if not isinstance(perms, dict):
+            return
+
+        if not _env_true("ADA_CONFIRM_LIST_MCP_TOOLS", False):
+            perms["list_mcp_tools"] = False
+
+        if not _env_true("ADA_CONFIRM_PORTAINER_CALL", False):
+            perms["portainer_call"] = False
+    except Exception:
+        return
 
 def load_settings():
     global SETTINGS
@@ -117,6 +141,7 @@ def load_settings():
                          SETTINGS["tool_permissions"].update(v)
                     else:
                         SETTINGS[k] = v
+            _enforce_tool_permission_defaults()
             print(f"Loaded settings: {SETTINGS}")
         except Exception as e:
             print(f"Error loading settings: {e}")
@@ -131,6 +156,7 @@ def save_settings():
 
 # Load on startup
 load_settings()
+_enforce_tool_permission_defaults()
 
 authenticator = None
 kasa_agent = KasaAgent(known_devices=SETTINGS.get("kasa_devices"))
@@ -419,6 +445,37 @@ async def connect(sid, environ):
     print(f"Client connected: {sid}")
     await sio.emit('status', {'msg': 'Connected to A.D.A Backend'}, room=sid)
 
+    async def _prewarm_tools():
+        timeout_s = float(os.getenv("ADA_TOOL_INIT_TIMEOUT_S") or 2.0)
+        try:
+            one_mcp_url = (os.getenv("ONE_MCP_URL") or "").strip()
+            if not one_mcp_url:
+                await sio.emit('status', {'msg': 'Tools: unavailable (ONE_MCP_URL not set)'}, room=sid)
+                return
+
+            mcp = getattr(ada, "_get_one_mcp_client", None)
+            if not callable(mcp):
+                await sio.emit('status', {'msg': 'Tools: unavailable (missing _get_one_mcp_client)'}, room=sid)
+                return
+
+            client = mcp()
+            if client is None:
+                await sio.emit('status', {'msg': 'Tools: unavailable (failed to create MCP client)'}, room=sid)
+                return
+
+            data = await asyncio.wait_for(client.list_tools(), timeout=timeout_s)
+            tools = (data or {}).get("tools") if isinstance(data, dict) else None
+            if tools is None:
+                tools = data
+            count = len(tools) if isinstance(tools, list) else 0
+            await sio.emit('status', {'msg': f'Tools: ready ({count} tools)'}, room=sid)
+        except asyncio.TimeoutError:
+            await sio.emit('status', {'msg': f'Tools: unavailable (init timeout after {timeout_s:.1f}s)'}, room=sid)
+        except Exception as e:
+            await sio.emit('status', {'msg': f'Tools: unavailable ({e})'}, room=sid)
+
+    asyncio.create_task(_prewarm_tools())
+
     global authenticator
 
     # Callback for Auth Status
@@ -502,6 +559,14 @@ async def start_audio(sid, data=None):
 
         print(f"Using input device: Name='{device_name}', Index={device_index}, BrowserAudio={use_browser_audio}")
 
+        try:
+            if use_browser_audio:
+                await sio.emit('status', {'msg': 'Browser audio: enabled (awaiting mic chunks...)'}, room=sid)
+            else:
+                await sio.emit('status', {'msg': 'Browser audio: disabled (using PyAudio mic)'}, room=sid)
+        except Exception:
+            pass
+
         if audio_loop:
             if loop_task and (loop_task.done() or loop_task.cancelled()):
                 print("Audio loop task appeared finished/cancelled. Clearing and restarting...")
@@ -528,6 +593,9 @@ async def start_audio(sid, data=None):
 
         def on_transcription(payload):
             asyncio.create_task(sio.emit('transcription', payload, room=sid))
+
+        def on_status(msg):
+            asyncio.create_task(sio.emit('status', {'msg': msg}, room=sid))
 
         def on_tool_confirmation(payload):
             asyncio.create_task(sio.emit('tool_confirmation_request', payload, room=sid))
@@ -559,6 +627,7 @@ async def start_audio(sid, data=None):
                 on_web_data=on_web_data,
                 on_transcription=on_transcription,
                 on_tool_confirmation=on_tool_confirmation,
+                on_status=on_status,
                 on_cad_status=on_cad_status,
                 on_cad_thought=on_cad_thought,
                 on_project_update=on_project_update,
@@ -595,8 +664,17 @@ async def start_audio(sid, data=None):
                     task.result()
                 except asyncio.CancelledError:
                     print("Audio Loop Cancelled")
+                    try:
+                        asyncio.create_task(sio.emit('status', {'msg': 'Audio loop stopped'}, room=sid))
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"Audio Loop Crashed: {e}")
+                    try:
+                        asyncio.create_task(sio.emit('error', {'msg': f'Audio loop crashed: {str(e)}'}, room=sid))
+                        asyncio.create_task(sio.emit('status', {'msg': f'Audio loop crashed: {str(e)}'}, room=sid))
+                    except Exception:
+                        pass
 
             loop_task.add_done_callback(handle_loop_exit)
             await sio.emit('status', {'msg': 'A.D.A Started'}, room=sid)
@@ -671,6 +749,19 @@ async def mic_audio_chunk(sid, data):
         audio_loop._browser_audio_chunk_counts[sid] = c
         if c % 50 == 0:
             print(f"[SERVER] mic_audio_chunk sid={sid} chunks={c} bytes={len(pcm_bytes)}")
+
+        if str(os.getenv('BROWSER_AUDIO_DEBUG') or '').strip().lower() in ('1', 'true', 'yes'):
+            if c % 100 == 0:
+                try:
+                    asyncio.create_task(
+                        sio.emit(
+                            'status',
+                            {'msg': f'[SERVER] mic_audio_chunk chunks={c} bytes={len(pcm_bytes)}'},
+                            room=sid,
+                        )
+                    )
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -1390,12 +1481,12 @@ async def get_settings(sid):
 
 @sio.event
 async def update_settings(sid, data):
-    # Generic update
     print(f"Updating settings: {data}")
     
     # Handle specific keys if needed
     if "tool_permissions" in data:
         SETTINGS["tool_permissions"].update(data["tool_permissions"])
+        _enforce_tool_permission_defaults()
         if audio_loop:
             audio_loop.update_permissions(SETTINGS["tool_permissions"])
             

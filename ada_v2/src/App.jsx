@@ -594,15 +594,20 @@ function App() {
 
         const onAssistantAudioFormat = (fmt) => {
             try {
-                const stored = parseInt(localStorage.getItem('assistant_audio_src_rate') || '', 10);
-                if (Number.isFinite(stored) && stored > 0) {
-                    assistantAudioSrcRateRef.current = stored;
-                    return;
-                }
-
                 const sr = parseInt(fmt?.sampleRate, 10);
                 if (Number.isFinite(sr) && sr > 0) {
                     assistantAudioSrcRateRef.current = sr;
+                    try {
+                        localStorage.setItem('assistant_audio_src_rate', String(sr));
+                    } catch (e) {
+                        // ignore
+                    }
+                    return;
+                }
+
+                const stored = parseInt(localStorage.getItem('assistant_audio_src_rate') || '', 10);
+                if (Number.isFinite(stored) && stored > 0) {
+                    assistantAudioSrcRateRef.current = stored;
                 }
             } catch (e) {
                 // ignore
@@ -634,7 +639,9 @@ function App() {
                 }
 
                 if (!ab || ab.byteLength < 2) return;
-                const int16 = new Int16Array(ab);
+                const alignedBytes = ab.byteLength - (ab.byteLength % 2);
+                if (alignedBytes < 2) return;
+                const int16 = new Int16Array(ab.slice(0, alignedBytes));
 
                 if (!playbackAudioContextRef.current) {
                     playbackAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -704,8 +711,10 @@ function App() {
                     if (Number.isFinite(stored) && stored > 0) {
                         assistantAudioSrcRateRef.current = stored;
                     } else {
-                        // Default to the playback AudioContext sample rate to avoid any speed/pitch mismatch.
-                        assistantAudioSrcRateRef.current = pctx.sampleRate || 48000;
+                        // Default to Gemini Live's typical PCM rate.
+                        // Using the playback AudioContext's rate here can cause time-stretch on devices
+                        // where the output hardware runs at 48kHz.
+                        assistantAudioSrcRateRef.current = 24000;
                     }
                 }
 

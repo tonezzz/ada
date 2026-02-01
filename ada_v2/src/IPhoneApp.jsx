@@ -32,6 +32,8 @@ function IPhoneApp() {
     const playbackQueueOffsetRef = useRef(0);
     const playbackBufferedSamplesRef = useRef(0);
     const playbackStartedRef = useRef(false);
+    const playbackTargetBufferSamplesRef = useRef(0);
+    const playbackUnderrunCountRef = useRef(0);
     const hasStreamedAssistantAudioRef = useRef(false);
     const assistantAudioSrcRateRef = useRef(null);
 
@@ -41,11 +43,36 @@ function IPhoneApp() {
         setMessages((prev) => [...prev, { role, text }]);
     };
 
-    const stopSpeaking = () => {
+    const stopAssistantPlayback = () => {
         try {
             if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
                 window.speechSynthesis.cancel();
             }
+        } catch (e) {
+            // ignore
+        }
+
+        try {
+            const processor = playbackProcessorRef.current;
+            if (processor) {
+                try {
+                    processor.disconnect();
+                } catch (e) {
+                    // ignore
+                }
+            }
+            playbackProcessorRef.current = null;
+        } catch (e) {
+            // ignore
+        }
+
+        try {
+            playbackQueueRef.current = [];
+            playbackQueueOffsetRef.current = 0;
+            playbackBufferedSamplesRef.current = 0;
+            playbackStartedRef.current = false;
+            playbackTargetBufferSamplesRef.current = 0;
+            playbackUnderrunCountRef.current = 0;
         } catch (e) {
             // ignore
         }
@@ -107,6 +134,11 @@ function IPhoneApp() {
                 const sr = parseInt(fmt?.sampleRate, 10);
                 if (Number.isFinite(sr) && sr > 0) {
                     assistantAudioSrcRateRef.current = sr;
+                    try {
+                        localStorage.setItem('assistant_audio_src_rate', String(sr));
+                    } catch (e) {
+                        // ignore
+                    }
                 }
             } catch (e) {
                 // ignore
@@ -119,7 +151,7 @@ function IPhoneApp() {
 
                 if (!hasStreamedAssistantAudioRef.current) {
                     hasStreamedAssistantAudioRef.current = true;
-                    stopSpeaking();
+                    stopAssistantPlayback();
                 }
 
                 let ab = null;
@@ -135,7 +167,8 @@ function IPhoneApp() {
                 const int16 = new Int16Array(ab);
 
                 if (!playbackAudioContextRef.current) {
-                    playbackAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)();
+                    // Prefer 48kHz for smoother resampling from 24kHz (2x), if supported.
+                    playbackAudioContextRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
                 }
                 const pctx = playbackAudioContextRef.current;
 
@@ -158,9 +191,13 @@ function IPhoneApp() {
                         const out = evt.outputBuffer.getChannelData(0);
                         out.fill(0);
 
-                        const minBuffer = Math.floor((pctx.sampleRate || 48000) * 0.12);
+                        const sr = pctx.sampleRate || 48000;
+                        if (!playbackTargetBufferSamplesRef.current) {
+                            playbackTargetBufferSamplesRef.current = Math.floor(sr * 0.06);
+                        }
+
                         if (!playbackStartedRef.current) {
-                            if ((playbackBufferedSamplesRef.current || 0) < minBuffer) return;
+                            if ((playbackBufferedSamplesRef.current || 0) < (playbackTargetBufferSamplesRef.current || 0)) return;
                             playbackStartedRef.current = true;
                         }
 
@@ -182,6 +219,22 @@ function IPhoneApp() {
                             if (playbackQueueOffsetRef.current >= head.length) {
                                 playbackQueueRef.current.shift();
                                 playbackQueueOffsetRef.current = 0;
+                            }
+                        }
+
+                        if (written < out.length) {
+                            playbackUnderrunCountRef.current = (playbackUnderrunCountRef.current || 0) + 1;
+                            playbackStartedRef.current = false;
+                            const nextTarget = Math.min(
+                                Math.floor(sr * 0.25),
+                                Math.max(playbackTargetBufferSamplesRef.current || 0, Math.floor(sr * 0.06)) + Math.floor(sr * 0.03)
+                            );
+                            playbackTargetBufferSamplesRef.current = nextTarget;
+                        } else {
+                            const minTarget = Math.floor(sr * 0.06);
+                            const cur = playbackTargetBufferSamplesRef.current || minTarget;
+                            if (cur > minTarget) {
+                                playbackTargetBufferSamplesRef.current = Math.max(minTarget, cur - Math.floor(sr * 0.003));
                             }
                         }
                     };
@@ -220,12 +273,17 @@ function IPhoneApp() {
             }
         };
 
+        const onAudioInterrupt = () => {
+            stopAssistantPlayback();
+        };
+
         socket.on('connect', onConnect);
         socket.on('disconnect', onDisconnect);
         socket.on('status', onStatus);
         socket.on('assistant_text', onAssistantText);
         socket.on('assistant_audio_format', onAssistantAudioFormat);
         socket.on('assistant_audio_chunk', onAssistantAudioChunk);
+        socket.on('audio_interrupt', onAudioInterrupt);
 
         return () => {
             socket.off('connect', onConnect);
@@ -234,13 +292,28 @@ function IPhoneApp() {
             socket.off('assistant_text', onAssistantText);
             socket.off('assistant_audio_format', onAssistantAudioFormat);
             socket.off('assistant_audio_chunk', onAssistantAudioChunk);
+            socket.off('audio_interrupt', onAudioInterrupt);
             socket.disconnect();
 
             try {
-                if (playbackProcessorRef.current) {
-                    playbackProcessorRef.current.disconnect();
-                    playbackProcessorRef.current.onaudioprocess = null;
+                const processor = playbackProcessorRef.current;
+                if (processor) {
+                    try {
+                        processor.disconnect();
+                    } catch (e) {
+                        // ignore
+                    }
                 }
+                playbackProcessorRef.current = null;
+            } catch (e) {
+                // ignore
+            }
+
+            try {
+                playbackQueueRef.current = [];
+                playbackQueueOffsetRef.current = 0;
+                playbackBufferedSamplesRef.current = 0;
+                playbackStartedRef.current = false;
             } catch (e) {
                 // ignore
             }
