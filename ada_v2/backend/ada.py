@@ -1340,6 +1340,19 @@ class AudioLoop:
             except Exception:
                 pass
 
+    async def _run_tool_background_then_send(self, label: str, coro):
+        try:
+            result = await coro
+            msg = f"System Notification: {label} result:\n{result}"
+        except Exception as e:
+            msg = f"System Notification: {label} failed: {e}"
+
+        try:
+            # This triggers a follow-up model response.
+            await self.session.send(input=msg, end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [TOOL] Background tool follow-up send failed: {e}")
+
     async def receive_audio(self):
         "Background task to reads from the websocket and write pcm chunks to the output queue"
         try:
@@ -1483,97 +1496,177 @@ class AudioLoop:
                                     tool = fc.args.get("tool")
                                     arguments = fc.args.get("arguments") or {}
                                     print(f"[ADA DEBUG] [TOOL] Tool Call: 'portainer_call' tool='{tool}'")
-                                    result_text = "Portainer MCP tool call failed."
-                                    try:
-                                        timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
-                                        if not tool:
-                                            raise RuntimeError("Missing tool")
+                                    if _env_true("ADA_ASYNC_TOOL_CALLS", False):
+                                        # Fast ack: let the model respond immediately; follow-up is sent async.
+                                        function_responses.append(
+                                            types.FunctionResponse(
+                                                id=fc.id,
+                                                name=fc.name,
+                                                response={"result": f"Starting portainer_call '{tool}'. Results will follow."},
+                                            )
+                                        )
 
+                                        timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
                                         if self._one_mcp is None:
                                             self._one_mcp = _get_one_mcp_client()
-                                        if self._one_mcp is None:
-                                            raise RuntimeError("ONE_MCP_URL is not set; cannot call Portainer tools")
-
-                                        tool_name = tool
-                                        if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
+                                        tool_name = tool or ""
+                                        if tool_name and not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
                                             tool_name = f"portainer_1mcp_{tool_name}"
 
-                                        result = await asyncio.wait_for(
-                                            self._one_mcp.call_tool(tool_name, arguments or {}),
-                                            timeout=timeout_s,
-                                        )
+                                        async def _coro():
+                                            if not tool_name:
+                                                raise RuntimeError("Missing tool")
+                                            if self._one_mcp is None:
+                                                raise RuntimeError("ONE_MCP_URL is not set; cannot call Portainer tools")
+                                            return await asyncio.wait_for(
+                                                self._one_mcp.call_tool(tool_name, arguments or {}),
+                                                timeout=timeout_s,
+                                            )
 
-                                        result_text = f"Portainer tool '{tool}' ok."
+                                        asyncio.create_task(
+                                            self._run_tool_background_then_send(
+                                                f"Portainer '{tool}'",
+                                                _coro(),
+                                            )
+                                        )
+                                    else:
+                                        result_text = "Portainer MCP tool call failed."
                                         try:
-                                            self._emit_system_status(f"Portainer '{tool}' result: {result}")
-                                        except Exception:
-                                            pass
-                                    except asyncio.TimeoutError:
-                                        result_text = "Portainer tool call timed out."
-                                    except Exception as e:
-                                        result_text = f"Portainer tool call failed: {e}"
+                                            timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
+                                            if not tool:
+                                                raise RuntimeError("Missing tool")
 
-                                    function_responses.append(
-                                        types.FunctionResponse(
-                                            id=fc.id,
-                                            name=fc.name,
-                                            response={"result": result_text},
+                                            if self._one_mcp is None:
+                                                self._one_mcp = _get_one_mcp_client()
+                                            if self._one_mcp is None:
+                                                raise RuntimeError("ONE_MCP_URL is not set; cannot call Portainer tools")
+
+                                            tool_name = tool
+                                            if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
+                                                tool_name = f"portainer_1mcp_{tool_name}"
+
+                                            result = await asyncio.wait_for(
+                                                self._one_mcp.call_tool(tool_name, arguments or {}),
+                                                timeout=timeout_s,
+                                            )
+
+                                            result_text = f"Portainer tool '{tool}' ok."
+                                            try:
+                                                self._emit_system_status(f"Portainer '{tool}' result: {result}")
+                                            except Exception:
+                                                pass
+                                        except asyncio.TimeoutError:
+                                            result_text = "Portainer tool call timed out."
+                                        except Exception as e:
+                                            result_text = f"Portainer tool call failed: {e}"
+
+                                        function_responses.append(
+                                            types.FunctionResponse(
+                                                id=fc.id,
+                                                name=fc.name,
+                                                response={"result": result_text},
+                                            )
                                         )
-                                    )
 
                                 elif fc.name == "list_mcp_tools":
                                     prefix = fc.args.get("prefix")
                                     print(f"[ADA DEBUG] [TOOL] Tool Call: 'list_mcp_tools' prefix='{prefix}'")
-                                    result_text = "MCP tools listing failed."
-                                    try:
+                                    if _env_true("ADA_ASYNC_TOOL_CALLS", False):
+                                        function_responses.append(
+                                            types.FunctionResponse(
+                                                id=fc.id,
+                                                name=fc.name,
+                                                response={"result": "Listing MCP tools now. Results will follow."},
+                                            )
+                                        )
+
                                         timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
 
-                                        if self._one_mcp is None:
-                                            self._one_mcp = _get_one_mcp_client()
-                                        if self._one_mcp is None:
-                                            raise RuntimeError("ONE_MCP_URL is not set; cannot list MCP tools")
+                                        async def _coro():
+                                            if self._one_mcp is None:
+                                                self._one_mcp = _get_one_mcp_client()
+                                            if self._one_mcp is None:
+                                                raise RuntimeError("ONE_MCP_URL is not set; cannot list MCP tools")
 
-                                        data = await asyncio.wait_for(self._one_mcp.list_tools(), timeout=timeout_s)
-                                        tools = (data or {}).get("tools") if isinstance(data, dict) else None
-                                        if tools is None:
-                                            tools = data
+                                            data = await asyncio.wait_for(self._one_mcp.list_tools(), timeout=timeout_s)
+                                            tools = (data or {}).get("tools") if isinstance(data, dict) else None
+                                            if tools is None:
+                                                tools = data
+                                            if isinstance(prefix, str) and prefix:
+                                                tools = [t for t in (tools or []) if isinstance(t, dict) and str(t.get("name", "")).startswith(prefix)]
 
-                                        if isinstance(prefix, str) and prefix:
-                                            tools = [t for t in (tools or []) if isinstance(t, dict) and str(t.get("name", "")).startswith(prefix)]
+                                            normalized = []
+                                            for t in (tools or []):
+                                                if not isinstance(t, dict):
+                                                    continue
+                                                normalized.append(
+                                                    {
+                                                        "name": t.get("name"),
+                                                        "description": t.get("description"),
+                                                        "inputSchema": t.get("inputSchema") or t.get("input_schema"),
+                                                    }
+                                                )
+                                            total = len(normalized)
+                                            preview_n = min(total, 30)
+                                            preview = normalized[:preview_n]
+                                            try:
+                                                self._emit_system_status(f"MCP tools list ({total}): {preview}")
+                                            except Exception:
+                                                pass
+                                            return f"Found {total} MCP tools" + (f" (prefix='{prefix}')" if isinstance(prefix, str) and prefix else "") + f". Preview: {preview}"
 
-                                        normalized = []
-                                        for t in (tools or []):
-                                            if not isinstance(t, dict):
-                                                continue
-                                            normalized.append(
-                                                {
-                                                    "name": t.get("name"),
-                                                    "description": t.get("description"),
-                                                    "inputSchema": t.get("inputSchema") or t.get("input_schema"),
-                                                }
-                                            )
-
-                                        total = len(normalized)
-                                        preview_n = min(total, 30)
-                                        preview = normalized[:preview_n]
-                                        result_text = f"Found {total} MCP tools" + (f" (prefix='{prefix}')" if isinstance(prefix, str) and prefix else "") + f". Preview: {preview}"
-
+                                        asyncio.create_task(self._run_tool_background_then_send("MCP tools", _coro()))
+                                    else:
+                                        result_text = "MCP tools listing failed."
                                         try:
-                                            self._emit_system_status(f"MCP tools list ({total}): {preview}")
-                                        except Exception:
-                                            pass
-                                    except asyncio.TimeoutError:
-                                        result_text = "MCP tools listing timed out."
-                                    except Exception as e:
-                                        result_text = f"Failed to list MCP tools: {e}"
+                                            timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
 
-                                    function_responses.append(
-                                        types.FunctionResponse(
-                                            id=fc.id,
-                                            name=fc.name,
-                                            response={"result": result_text},
+                                            if self._one_mcp is None:
+                                                self._one_mcp = _get_one_mcp_client()
+                                            if self._one_mcp is None:
+                                                raise RuntimeError("ONE_MCP_URL is not set; cannot list MCP tools")
+
+                                            data = await asyncio.wait_for(self._one_mcp.list_tools(), timeout=timeout_s)
+                                            tools = (data or {}).get("tools") if isinstance(data, dict) else None
+                                            if tools is None:
+                                                tools = data
+
+                                            if isinstance(prefix, str) and prefix:
+                                                tools = [t for t in (tools or []) if isinstance(t, dict) and str(t.get("name", "")).startswith(prefix)]
+
+                                            normalized = []
+                                            for t in (tools or []):
+                                                if not isinstance(t, dict):
+                                                    continue
+                                                normalized.append(
+                                                    {
+                                                        "name": t.get("name"),
+                                                        "description": t.get("description"),
+                                                        "inputSchema": t.get("inputSchema") or t.get("input_schema"),
+                                                    }
+                                                )
+
+                                            total = len(normalized)
+                                            preview_n = min(total, 30)
+                                            preview = normalized[:preview_n]
+                                            result_text = f"Found {total} MCP tools" + (f" (prefix='{prefix}')" if isinstance(prefix, str) and prefix else "") + f". Preview: {preview}"
+
+                                            try:
+                                                self._emit_system_status(f"MCP tools list ({total}): {preview}")
+                                            except Exception:
+                                                pass
+                                        except asyncio.TimeoutError:
+                                            result_text = "MCP tools listing timed out."
+                                        except Exception as e:
+                                            result_text = f"Failed to list MCP tools: {e}"
+
+                                        function_responses.append(
+                                            types.FunctionResponse(
+                                                id=fc.id,
+                                                name=fc.name,
+                                                response={"result": result_text},
+                                            )
                                         )
-                                    )
 
                                 elif fc.name == "run_web_agent":
                                     print(f"[ADA DEBUG] [TOOL] Tool Call: 'run_web_agent' with prompt='{prompt}'")
