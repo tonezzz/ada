@@ -1980,10 +1980,16 @@ class AudioLoop:
             try:
                 code = getattr(e, "code", None)
                 reason = getattr(e, "reason", None)
-                self._emit_system_status(
-                    f"Gemini Live disconnected (code={code}, reason={reason}). "
-                    "This usually means the configured MODEL isn't available for your API key/region, or the request was rejected."
-                )
+                if code == 1011 or (isinstance(reason, str) and "service is currently unavailable" in reason.lower()):
+                    self._emit_system_status(
+                        f"Gemini Live disconnected (code={code}, reason={reason}). "
+                        "The Gemini service is currently unavailable (transient). Ada will retry automatically."
+                    )
+                else:
+                    self._emit_system_status(
+                        f"Gemini Live disconnected (code={code}, reason={reason}). "
+                        "This usually means the configured MODEL isn't available for your API key/region, or the request was rejected."
+                    )
             except Exception:
                 pass
             print(f"[ADA DEBUG] [LIVE] Websocket closed: {e}")
@@ -2205,6 +2211,17 @@ class AudioLoop:
                 # Add a small jitter to avoid synchronized reconnect storms.
                 jitter = random.uniform(0.0, min(1.0, retry_delay * 0.1))
                 delay = retry_delay + jitter
+                try:
+                    if "service is currently unavailable" in emsg:
+                        self._emit_system_status(
+                            f"Gemini Live service unavailable. Retrying in {delay:.0f}s..."
+                        )
+                    else:
+                        self._emit_system_status(
+                            f"Gemini Live disconnected. Retrying in {delay:.0f}s..."
+                        )
+                except Exception:
+                    pass
                 print(f"[ADA DEBUG] [RETRY] Reconnecting in {delay:.2f} seconds...")
                 await asyncio.sleep(delay)
                 retry_delay = min(retry_delay * 2, 60) # Exponential backoff capped at 60s
