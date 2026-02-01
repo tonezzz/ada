@@ -1506,20 +1506,31 @@ class AudioLoop:
                                             )
                                         )
 
-                                        timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
-                                        if self._one_mcp is None:
-                                            self._one_mcp = _get_one_mcp_client()
-                                        tool_name = tool or ""
-                                        if tool_name and not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
-                                            tool_name = f"portainer_1mcp_{tool_name}"
-
                                         async def _coro():
+                                            timeout_s = float(os.getenv("ADA_TOOL_CALL_TIMEOUT_S") or 10.0)
+                                            tool_name = tool or ""
                                             if not tool_name:
                                                 raise RuntimeError("Missing tool")
+
+                                            # Prefer 1MCP if configured, otherwise fallback to stdio portainer-mcp.
                                             if self._one_mcp is None:
-                                                raise RuntimeError("ONE_MCP_URL is not set; cannot call Portainer tools")
+                                                self._one_mcp = _get_one_mcp_client()
+                                            if self._one_mcp is not None:
+                                                if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
+                                                    tool_name_prefixed = f"portainer_1mcp_{tool_name}"
+                                                else:
+                                                    tool_name_prefixed = tool_name
+                                                return await asyncio.wait_for(
+                                                    self._one_mcp.call_tool(tool_name_prefixed, arguments or {}),
+                                                    timeout=timeout_s,
+                                                )
+
+                                            if self._portainer_mcp is None:
+                                                self._portainer_mcp = _get_portainer_mcp_client()
+                                            if self._portainer_mcp is None:
+                                                raise RuntimeError("Portainer MCP client is not configured")
                                             return await asyncio.wait_for(
-                                                self._one_mcp.call_tool(tool_name, arguments or {}),
+                                                self._portainer_mcp.call_tool(tool_name, arguments or {}),
                                                 timeout=timeout_s,
                                             )
 
@@ -1536,19 +1547,24 @@ class AudioLoop:
                                             if not tool:
                                                 raise RuntimeError("Missing tool")
 
+                                            # Prefer 1MCP if configured, otherwise fallback to stdio portainer-mcp.
                                             if self._one_mcp is None:
                                                 self._one_mcp = _get_one_mcp_client()
-                                            if self._one_mcp is None:
-                                                raise RuntimeError("ONE_MCP_URL is not set; cannot call Portainer tools")
-
-                                            tool_name = tool
-                                            if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
-                                                tool_name = f"portainer_1mcp_{tool_name}"
-
-                                            result = await asyncio.wait_for(
-                                                self._one_mcp.call_tool(tool_name, arguments or {}),
-                                                timeout=timeout_s,
-                                            )
+                                            if self._one_mcp is not None:
+                                                tool_name = tool
+                                                if not tool_name.startswith("portainer_1mcp_") and not tool_name.startswith("portainer_"):
+                                                    tool_name = f"portainer_1mcp_{tool_name}"
+                                                result = await asyncio.wait_for(
+                                                    self._one_mcp.call_tool(tool_name, arguments or {}),
+                                                    timeout=timeout_s,
+                                                )
+                                            else:
+                                                if self._portainer_mcp is None:
+                                                    self._portainer_mcp = _get_portainer_mcp_client()
+                                                result = await asyncio.wait_for(
+                                                    self._portainer_mcp.call_tool(tool, arguments or {}),
+                                                    timeout=timeout_s,
+                                                )
 
                                             result_text = f"Portainer tool '{tool}' ok."
                                             try:
