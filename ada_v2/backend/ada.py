@@ -16,6 +16,7 @@ import json
 import httpx
 import random
 from collections import deque
+from websockets.exceptions import ConnectionClosedError
 
 from google import genai
 from google.genai import types
@@ -1975,11 +1976,22 @@ class AudioLoop:
 
                 while not self.audio_in_queue.empty():
                     self.audio_in_queue.get_nowait()
+        except ConnectionClosedError as e:
+            try:
+                code = getattr(e, "code", None)
+                reason = getattr(e, "reason", None)
+                self._emit_system_status(
+                    f"Gemini Live disconnected (code={code}, reason={reason}). "
+                    "This usually means the configured MODEL isn't available for your API key/region, or the request was rejected."
+                )
+            except Exception:
+                pass
+            print(f"[ADA DEBUG] [LIVE] Websocket closed: {e}")
+            raise
         except Exception as e:
             print(f"Error in receive_audio: {e}")
             traceback.print_exc()
-            # CRITICAL: Re-raise to crash the TaskGroup and trigger outer loop reconnect
-            raise e
+            raise
 
     async def _send_tool_results(self, function_responses):
         # Native tool responses are opt-in, because they can trigger 1008 policy violations
