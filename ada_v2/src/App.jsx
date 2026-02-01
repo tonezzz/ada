@@ -596,11 +596,32 @@ function App() {
             try {
                 const sr = parseInt(fmt?.sampleRate, 10);
                 if (Number.isFinite(sr) && sr > 0) {
+                    try {
+                        console.log('[AssistantAudioFormat] sampleRate=', sr, 'fmt=', fmt);
+                    } catch (e) {
+                        // ignore
+                    }
+
+                    const prev = assistantAudioSrcRateRef.current;
                     assistantAudioSrcRateRef.current = sr;
                     try {
                         localStorage.setItem('assistant_audio_src_rate', String(sr));
                     } catch (e) {
                         // ignore
+                    }
+
+                    // If we change rates mid-stream, clear any buffered audio so we don't
+                    // play chunks decoded/resampled under the wrong assumed src rate.
+                    if (prev != null && prev !== sr) {
+                        try {
+                            playbackQueueRef.current = [];
+                            playbackQueueOffsetRef.current = 0;
+                            playbackBufferedSamplesRef.current = 0;
+                            playbackStartedRef.current = false;
+                            playbackLoggedRef.current = false;
+                        } catch (e) {
+                            // ignore
+                        }
                     }
                     return;
                 }
