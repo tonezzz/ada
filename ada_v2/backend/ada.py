@@ -2073,8 +2073,8 @@ class AudioLoop:
                 await self.out_queue.put(frame)
         cap.release()
 
-    def _get_frame(self, cap):
-        ret, frame = cap.read()
+    async def _get_frames(self):
+        ret, frame = await asyncio.to_thread(self.cap.read)
         if not ret:
             return None
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -2086,10 +2086,8 @@ class AudioLoop:
         image_bytes = image_io.read()
         return {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()}
 
-    async def _get_screen(self):
-        pass 
     async def get_screen(self):
-         pass
+        pass
 
     async def run(self, start_message=None):
         retry_delay = 1
