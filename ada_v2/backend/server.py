@@ -585,6 +585,12 @@ async def start_audio(sid, data=None):
             viz = [b for i, b in enumerate(data_bytes[::step][:64])]
             asyncio.create_task(sio.emit('audio_data', {'data': viz}, room=sid))
 
+        def on_audio_format(fmt):
+            try:
+                asyncio.create_task(sio.emit('assistant_audio_format', fmt, room=sid))
+            except Exception:
+                pass
+
         def on_cad_data(payload):
             asyncio.create_task(sio.emit('cad_data', payload, room=sid))
 
@@ -623,6 +629,7 @@ async def start_audio(sid, data=None):
             audio_loop = ada.AudioLoop(
                 video_mode="none",
                 on_audio_data=on_audio_data,
+                on_audio_format=on_audio_format,
                 on_cad_data=on_cad_data,
                 on_web_data=on_web_data,
                 on_transcription=on_transcription,
@@ -640,19 +647,18 @@ async def start_audio(sid, data=None):
             )
             audio_loop.update_permissions(SETTINGS["tool_permissions"])
 
-            if use_browser_audio:
-                try:
-                    await sio.emit(
-                        'assistant_audio_format',
-                        {
-                            'sampleRate': getattr(ada, 'RECEIVE_SAMPLE_RATE', 24000),
-                            'channels': 1,
-                            'encoding': 'pcm_s16le',
-                        },
-                        room=sid,
-                    )
-                except Exception:
-                    pass
+            try:
+                await sio.emit(
+                    'assistant_audio_format',
+                    {
+                        'sampleRate': getattr(ada, 'RECEIVE_SAMPLE_RATE', 24000),
+                        'channels': 1,
+                        'encoding': 'pcm_s16le',
+                    },
+                    room=sid,
+                )
+            except Exception:
+                pass
 
             if data and data.get('muted', False):
                 audio_loop.set_paused(True)

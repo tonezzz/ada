@@ -566,14 +566,36 @@ from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_audio_interrupt=None, on_status=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, use_browser_audio=False):
+    def __init__(
+        self,
+        video_mode="camera",
+        on_audio_data=None,
+        on_audio_format=None,
+        on_video_frame=None,
+        on_cad_data=None,
+        on_web_data=None,
+        on_transcription=None,
+        on_tool_confirmation=None,
+        on_cad_status=None,
+        on_cad_thought=None,
+        on_project_update=None,
+        on_device_update=None,
+        on_error=None,
+        on_audio_interrupt=None,
+        on_status=None,
+        input_device_index=None,
+        input_device_name=None,
+        output_device_index=None,
+        kasa_agent=None,
+        use_browser_audio=False):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
+        self.on_audio_format = on_audio_format
         self.on_video_frame = on_video_frame
         self.on_cad_data = on_cad_data
         self.on_web_data = on_web_data
         self.on_transcription = on_transcription
-        self.on_tool_confirmation = on_tool_confirmation 
+        self.on_tool_confirmation = on_tool_confirmation
         self.on_cad_status = on_cad_status
         self.on_cad_thought = on_cad_thought
         self.on_project_update = on_project_update
@@ -603,6 +625,8 @@ class AudioLoop:
 
         self.session = None
         self._one_mcp = None
+
+        self._last_assistant_audio_rate = None
         
         # Create CadAgent with thought callback
         def handle_cad_thought(thought_text):
@@ -1333,6 +1357,21 @@ class AudioLoop:
                 async for response in turn:
                     # 1. Handle Audio Data
                     if data := response.data:
+                        try:
+                            mt = (
+                                getattr(response, "mime_type", None)
+                                or getattr(response, "data_mime_type", None)
+                                or getattr(response, "dataMimeType", None)
+                            )
+                            if isinstance(mt, str) and "rate=" in mt:
+                                rate_str = mt.split("rate=", 1)[1].split(";", 1)[0].strip()
+                                rate = int(rate_str)
+                                if rate > 0 and rate != self._last_assistant_audio_rate:
+                                    self._last_assistant_audio_rate = rate
+                                    if self.on_audio_format:
+                                        self.on_audio_format({"sampleRate": rate, "channels": 1, "encoding": "pcm_s16le"})
+                        except Exception:
+                            pass
                         self.audio_in_queue.put_nowait(data)
                         # NOTE: 'continue' removed here to allow processing transcription/tools in same packet
 
