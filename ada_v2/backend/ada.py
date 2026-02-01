@@ -34,7 +34,7 @@ SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = int(os.getenv("ADA_RECEIVE_SAMPLE_RATE") or 24000)
 CHUNK_SIZE = 1024
 
-MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+MODEL = (os.getenv("ADA_GEMINI_MODEL") or "models/gemini-2.5-flash-native-audio-latest").strip()
 DEFAULT_MODE = "camera"
 
 load_dotenv()
