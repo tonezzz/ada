@@ -597,7 +597,9 @@ function App() {
                 const sr = parseInt(fmt?.sampleRate, 10);
                 if (Number.isFinite(sr) && sr > 0) {
                     try {
-                        console.log('[AssistantAudioFormat] sampleRate=', sr, 'fmt=', fmt);
+                        if ((localStorage.getItem('audio_debug') || '') === '1') {
+                            console.log('[AssistantAudioFormat] sampleRate=', sr, 'fmt=', fmt);
+                        }
                     } catch (e) {
                         // ignore
                     }
@@ -743,7 +745,13 @@ function App() {
                 const dstRate = pctx.sampleRate || 48000;
                 if (!playbackLoggedRef.current) {
                     playbackLoggedRef.current = true;
-                    console.log('[AssistantAudio] srcRate=', srcRate, 'dstRate=', dstRate, 'chunkBytes=', ab.byteLength);
+                    try {
+                        if ((localStorage.getItem('audio_debug') || '') === '1') {
+                            console.log('[AssistantAudio] srcRate=', srcRate, 'dstRate=', dstRate, 'chunkBytes=', ab.byteLength);
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
                 }
                 const out = (dstRate && dstRate !== srcRate)
                     ? _resampleFloat32(float32, srcRate, dstRate)
